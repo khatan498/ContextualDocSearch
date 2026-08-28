@@ -17,9 +17,20 @@ class TestDefaults:
 
     def test_chunk_defaults(self) -> None:
         settings = Settings()
-        assert settings.chunk_min_tokens == 500
-        assert settings.chunk_max_tokens == 800
+        assert settings.chunk_min_tokens == 350
+        assert settings.chunk_max_tokens == 480
         assert settings.chunk_overlap_ratio == pytest.approx(0.15)
+
+    def test_embedding_defaults(self) -> None:
+        settings = Settings()
+        assert settings.embedding_model_name == "BAAI/bge-base-en-v1.5"
+        assert settings.embedding_batch_size == 32
+
+    def test_chunk_window_fits_the_default_model(self) -> None:
+        # bge-base-en-v1.5 accepts 512 tokens and truncates silently past it.
+        # This asserts the shipped defaults are a safe pairing; the same check
+        # runs against the real model in EmbeddingModel at index time.
+        assert Settings().chunk_max_tokens <= 512
 
 
 class TestScope:

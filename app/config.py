@@ -47,6 +47,18 @@ class Settings(BaseSettings):
     # The bundled demo corpus. This is the only content the app ever reads.
     sample_docs_path: Path = Path("data/sample_docs")
 
+    # --- Embeddings ------------------------------------------------------
+    # Downloaded from Hugging Face on first use and cached under
+    # ~/.cache/huggingface. bge-base-en-v1.5 accepts 512 tokens and produces
+    # 768-dimension vectors; the chunk window below is sized against that limit
+    # and the pairing is enforced in EmbeddingModel, not here — reading the
+    # model's limit means loading the model, which config must never do.
+    embedding_model_name: str = "BAAI/bge-base-en-v1.5"
+
+    # How many chunks are encoded per forward pass. Larger is faster but uses
+    # more memory; 32 is comfortable on CPU.
+    embedding_batch_size: int = Field(default=32, gt=0)
+
     # --- Storage ---------------------------------------------------------
     vector_store_path: Path = Path("data/index")
 
@@ -57,8 +69,11 @@ class Settings(BaseSettings):
     max_file_size_bytes: int = Field(default=50 * 1024 * 1024, gt=0)  # 50 MB
 
     # --- Chunking --------------------------------------------------------
-    chunk_min_tokens: int = Field(default=500, gt=0)
-    chunk_max_tokens: int = Field(default=800, gt=0)
+    # Sized for the embedding model above: 480 leaves 32 tokens of headroom
+    # under bge-base's 512 limit for the special tokens it adds. Raising these
+    # past the model's limit is caught at index time by EmbeddingModel.
+    chunk_min_tokens: int = Field(default=350, gt=0)
+    chunk_max_tokens: int = Field(default=480, gt=0)
     chunk_overlap_ratio: float = Field(default=0.15, ge=0.0, lt=1.0)
 
     @model_validator(mode="after")

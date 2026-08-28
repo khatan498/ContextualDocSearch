@@ -10,11 +10,13 @@ keywords with the question.
 **This is a demo.** It searches the documents in `data/sample_docs/` and nothing
 else. Connecting your own files is a planned future release — see [Modes](#modes).
 
-> ## Work in progress — not usable as a search engine yet
+> ## Work in progress — no search API yet
 >
-> Document ingestion works and is tested. Nothing is embedded, indexed, or
-> searchable yet, and there is no API or UI. Several files in the tree are
-> deliberately empty placeholders.
+> Ingestion and indexing work and are tested. Both indexes build over the sample
+> documents, and `scripts/build_index.py --verify` will query them — but that is a
+> diagnostic that reports each index separately, not search. The layer that merges
+> and reranks them does not exist yet, and there is no API or UI. Several files in
+> the tree are deliberately empty placeholders.
 >
 > This repo is public to track progress in the open, not because it is ready to use.
 > Read [Known issues](#known-issues) before building on it.
@@ -37,13 +39,23 @@ Ingestion over the bundled sample documents:
 - **Refuse to start in personal mode**, explaining what that mode will eventually do
   rather than failing obscurely.
 
-100 tests cover this, and they run offline in about a second.
+Then build two indexes over those chunks:
+
+- **Embed every chunk locally** with `bge-base-en-v1.5` through
+  `sentence-transformers` — 768 dimensions, no external API, nothing leaves the
+  machine.
+- **Measure chunk boundaries with the model's own tokenizer**, and refuse to build
+  at all if the configured chunk size exceeds what the model can read. Embedding
+  models truncate oversized input silently, so this failure has to be made loud.
+- **Store vectors in Chroma** under cosine distance, with deterministic chunk ids so
+  a rebuild replaces the previous index rather than accumulating duplicates.
+- **Store a BM25 keyword index** as plain JSON — inspectable, and portable across
+  library versions in a way a pickle would not be.
+
+175 tests cover this, and the default run is offline in about two seconds.
 
 ## What is planned
 
-- **Fix the known chunking issues** below and add regression tests for them.
-- **Embeddings and indexing** — local sentence-transformers embeddings, a Chroma
-  vector store, and a BM25 keyword index built by `scripts/build_index.py`.
 - **Hybrid retrieval** — merge keyword and vector results through reciprocal rank
   fusion, then rerank with a cross-encoder. Vector similarity alone is never the
   final answer.
@@ -97,12 +109,58 @@ cp .env.example .env               # Windows: copy .env.example .env
 Every setting has a working default, so `.env` is optional until you want to change
 chunk sizes. See [`.env.example`](.env.example) for what is tunable.
 
-## Trying the ingestion pipeline
+## Building the indexes
 
-This is the only working entry point right now. The sample documents are already in
-`data/sample_docs/`, so there is nothing to add. Save the following at the **repo
-root** and run it from there — the project is not yet pip-installable, so `app` is
-only importable when the repo root is your working directory:
+The sample documents are already in `data/sample_docs/`, so there is nothing to add:
+
+```bash
+python scripts/build_index.py
+```
+
+The first run downloads the embedding model (~440 MB) into the Hugging Face cache;
+later runs reuse it. Output:
+
+```
+corpus : .../data/sample_docs
+model  : BAAI/bge-base-en-v1.5
+         limit 512 tokens, 768 dims
+
+individual-svcs-agrmnt.docx       38 chunks
+Sample Contract.docx              24 chunks
+Texas-Sublease-Agreement.pdf       4 chunks
+Warranty Forms.pdf                 3 chunks
+
+chunks : 69  (largest 480 tokens)
+```
+
+Then query each index — a diagnostic, not the search API:
+
+```bash
+python scripts/build_index.py --verify "how long is the warranty"
+```
+
+```
+  vector index (cosine similarity, 1.0 = identical)
+      0.580  Warranty Forms.pdf#1  GUARANTEE/WARRANTY for ______________ We hereby...
+      0.535  Warranty Forms.pdf#0  GUARANTEE/WARRANTY FORM FOR EQUIPMENT OR COMPO...
+
+  keyword index (BM25 score, corpus-relative)
+      7.856  individual-svcs-agrmnt.docx#33  THIS IS AN EXAMPLE ONLY. Please contact...
+      7.719  Warranty Forms.pdf#0  GUARANTEE/WARRANTY FORM FOR EQUIPMENT OR COMPO...
+```
+
+That output is a compact argument for why this project is hybrid. The vector index
+gets the warranty document right from a question sharing almost no words with it.
+BM25's top hit is an unrelated clause, dragged there by "how", "long" and "the" —
+but BM25 is the half that will match `INV-2024-88213` exactly, which embeddings blur
+into every other reference number. Phase 3 fuses the two so each covers the other's
+blind spot.
+
+## Trying the ingestion pipeline directly
+
+Chunking without touching the index. Save this at the **repo root** and run it from
+there — the project is not yet pip-installable, so `app` is only importable when the
+repo root is your working directory:
 
 ```python
 from app.ingestion.chunking import chunk_text
@@ -126,12 +184,18 @@ for raw_bytes, metadata in connector.iter_documents():
 ## Tests
 
 ```bash
-pytest              # 100 tests, about 1 second, no network required
+pytest                    # 175 tests, about 2 seconds, no network required
+pytest -m integration     # 2 more that load the real model
 ```
 
-Chunking tests use a word-based token estimate rather than a real tokenizer, which
-keeps the suite offline and fast. Any change to chunking or retrieval logic needs a
-corresponding test.
+The default run is offline. Chunking tests use a word-based token estimate rather
+than a real tokenizer, and the embedding tests run against a stub injected into
+`sys.modules` — which works because `EmbeddingModel` imports `sentence_transformers`
+inside `__init__` rather than at module scope. Vector-store tests use real Chroma
+through an in-memory client, so distance semantics are genuinely covered rather than
+mocked.
+
+Any change to chunking or retrieval logic needs a corresponding test.
 
 ---
 
@@ -147,18 +211,26 @@ app/
 │   │   └── local_fs.py          working — recursive walk, skip rules
 │   ├── loaders.py               working — PDF/DOCX/TXT to plain text
 │   └── chunking.py              working — overlapping, size-bounded chunks
-├── indexing/                    planned — embeddings, vector store, BM25
+├── indexing/
+│   ├── embeddings.py            working — bge-base behind a TextEmbedder Protocol
+│   ├── hits.py                  working — IndexHit, the shape both indexes return
+│   ├── keyword_index.py         working — BM25, persisted as JSON
+│   └── vector_store.py          working — Chroma, cosine, deterministic ids
 ├── retrieval/                   planned — rank fusion, reranking
 └── api/main.py                  planned — search endpoint
 ui/streamlit_app.py              planned — search UI
-scripts/build_index.py           planned — index builder
+scripts/build_index.py           working — index builder + --verify diagnostic
 data/sample_docs/                the demo corpus (4 documents)
+data/index/                      built artifacts (gitignored, rebuildable)
 ```
 
 The working part of the pipeline is a straight line:
 
 ```
-LocalFSConnector → (bytes, DocumentMetadata) → extract_text() → str → chunk_text() → Chunk
+LocalFSConnector → (bytes, DocumentMetadata) → extract_text() → str
+    → chunk_text(count_tokens=model.count_tokens) → Chunk
+        → embed_documents() → VectorStore
+        → KeywordIndex
 ```
 
 ### Design decisions worth knowing
@@ -177,30 +249,32 @@ neither answers the question alone. Overlap repeats the tail so the complete
 statement survives intact somewhere.
 
 **Token counting is pluggable.** `chunk_text()` accepts a `count_tokens` callable,
-defaulting to a word-based estimate (about 1.3 tokens per word). This keeps
-ingestion free of any model dependency and the tests offline. The embedding layer
-can later pass the real model's tokenizer without touching `chunking.py`.
+defaulting to a word-based estimate (about 1.3 tokens per word). That keeps
+`chunking.py` free of any model dependency and the tests offline, while
+`build_index.py` passes the model's real tokenizer so the boundaries that end up in
+the index are measured in the units the model reads. The estimate is not good enough
+for that job: it under-counts by roughly 12% on mixed prose and by 44–74% on table
+rows, dates and reference numbers — exactly the chunks holding the facts a query is
+usually after.
 
-**The truncation trap.** Embedding models have hard input limits and **silently
-truncate** past them — no error, just missing text. `all-MiniLM-L6-v2` caps at 256
-tokens, `bge-base-en-v1.5` at 512. The default 500–800 token chunks would be cut off
-by either. Chunk sizes are configurable for exactly this reason, and the embedding
-layer must assert `chunk_max_tokens <= model.max_seq_length` at startup.
+**The truncation trap, and why the guard sits where it does.** Embedding models have
+hard input limits and **silently truncate** past them — no error, just missing text.
+`bge-base-en-v1.5` caps at 512, so `CHUNK_MAX_TOKENS` defaults to 480, leaving room
+for the special tokens the model adds (a 480-token chunk arrives as 482).
+`EmbeddingModel` refuses to construct if the configured ceiling exceeds the model's
+limit. That check lives there rather than in `Settings` deliberately: reading
+`max_seq_length` means loading the model, and reading configuration should never
+trigger a 440 MB download.
+
+**The two indexes are not score-comparable, on purpose.** Cosine similarity sits in
+roughly [-1, 1]; BM25 is unbounded and depends on the corpus. Nothing normalises one
+against the other, because reciprocal rank fusion works on each hit's *rank* within
+its own list and never compares the raw numbers.
 
 ---
 
 ## Known issues
 
-Found by randomised invariant testing. The existing unit tests do not catch these.
-
-- **Chunks can exceed `max_tokens`,** by up to roughly double. After a chunk closes,
-  the next is seeded with the overlap tail, but `max_tokens` is not re-checked before
-  the following segment is appended. Combined with `_overlap_tail()` taking its first
-  segment regardless of the overlap budget, a 300-token limit has produced a
-  521-token chunk. This feeds directly into the truncation trap described above.
-- **Duplicate chunks.** The same mechanism can emit a chunk whose content is entirely
-  contained in its predecessor — wasted index space, and the same text competing with
-  itself in results.
 - **DOCX loses document order.** Paragraphs are extracted before tables rather than
   interleaved as they appear. Content is preserved; position is not.
 - **Scanned PDFs yield nothing.** Text extraction only, no OCR. An image-only PDF
@@ -212,8 +286,12 @@ Found by randomised invariant testing. The existing unit tests do not catch thes
   a dependency can break a fresh install.
 - **Garbled PDFs extract silently.** A PDF with no ToUnicode CMap yields mojibake
   instead of text, and `extract_text()` does not raise — so skip-and-log never fires
-  and the junk would reach the index. One sample document hit this and was removed
-  from the corpus. Detecting it is a Phase 2 follow-up.
+  and the junk reaches the index. One sample document hit this and was removed from
+  the corpus. Still undetected; worth fixing before the corpus grows.
+- **Only one in-memory vector store may be alive per process.** Chroma caches its
+  in-memory system, so constructing a second `VectorStore.in_memory()` drops the
+  collection the first is holding. Use `VectorStore.open()` with separate directories
+  when two must coexist. Documented on the method and pinned by a test.
 - **No CI**, and no `LICENSE` file yet — see below.
 
 ## A note on privacy
@@ -222,9 +300,10 @@ The app reads the documents bundled in `data/sample_docs/` and nothing else. The
 is no cloud connector, no credential handling, and no upload path in this build, so
 it cannot reach your own files whether you run it locally or deploy it.
 
-Everything stays on your machine regardless: embeddings will run locally through
-`sentence-transformers`, with no external API calls. `.gitignore` covers `.env` and
-the built index.
+Everything stays on your machine: embeddings are computed locally through
+`sentence-transformers`, with no external API calls. The only network access is the
+one-time model download from Hugging Face on the first index build; Chroma's usage
+telemetry is switched off explicitly. `.gitignore` covers `.env` and the built index.
 
 ## License
 

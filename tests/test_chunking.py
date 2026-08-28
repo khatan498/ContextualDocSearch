@@ -1,5 +1,7 @@
 """Tests for app.ingestion.chunking."""
 
+import itertools
+
 import pytest
 
 from app.ingestion.chunking import Chunk, chunk_text, estimate_tokens
@@ -92,6 +94,109 @@ class TestSizeWindow:
 
         assert chunks[0].start_char == 0
         assert chunks[-1].end_char == len(document.rstrip())
+
+
+class TestPackerRegressions:
+    """Two defects that shared one mechanism, fixed at the start of Phase 2.
+
+    When a chunk closes, the next is seeded with the overlap tail. Neither what
+    that tail cost, nor whether it contained anything new, was re-checked. So
+    the packer could emit a chunk far above ``max_tokens`` — which the embedding
+    model would then silently truncate — and could emit a chunk whose span sat
+    entirely inside its predecessor, wasting index space and letting one passage
+    compete with itself in results.
+
+    The parameters below were found by differential testing against the pre-fix
+    implementation; each case fails on it and passes now.
+    """
+
+    @staticmethod
+    def _count(text: str) -> int:
+        """One token per word, so the sizes in these tests are exact."""
+        return len(text.split())
+
+    @staticmethod
+    def _document(paragraphs: list[list[int]]) -> str:
+        """Build text from per-paragraph sentence word-counts.
+
+        Words are numbered so that no two spans can compare equal by accident —
+        a corpus of identical words makes distinct chunks look like duplicates.
+        """
+        counter = itertools.count()
+        return "\n\n".join(
+            " ".join(
+                " ".join(f"w{next(counter)}" for _ in range(words)) + "."
+                for words in sentences
+            )
+            for sentences in paragraphs
+        )
+
+    def test_overlap_tail_cannot_push_a_chunk_over_max_tokens(self) -> None:
+        # Pre-fix: emitted a 59-token chunk against max_tokens=53.
+        document = self._document([[8], [16, 43]])
+
+        chunks = list(
+            chunk_text(
+                document,
+                source_id="doc",
+                min_tokens=22,
+                max_tokens=53,
+                overlap_ratio=0.3,
+                count_tokens=self._count,
+            )
+        )
+
+        assert chunks
+        assert all(chunk.token_count <= 53 for chunk in chunks)
+
+    def test_the_large_overflow_originally_reported(self) -> None:
+        # The headline case: one paragraph of three sentences, where the large
+        # final sentence became the overlap tail. Pre-fix this reached 1450
+        # tokens against a limit of 800 — 1.81x over.
+        def sentence(words: int) -> str:
+            return " ".join(["w"] * words) + "."
+
+        document = " ".join([sentence(100), sentence(700), sentence(750)])
+
+        chunks = list(
+            chunk_text(
+                document,
+                source_id="doc",
+                min_tokens=500,
+                max_tokens=800,
+                overlap_ratio=0.15,
+                count_tokens=self._count,
+            )
+        )
+
+        assert chunks
+        assert all(chunk.token_count <= 800 for chunk in chunks)
+
+    def test_no_chunk_is_wholly_contained_in_its_predecessor(self) -> None:
+        # Pre-fix: emitted four chunks, the third spanning (478, 676) entirely
+        # inside the second's (396, 676) — carried-over overlap and nothing new.
+        document = self._document([[53, 22], [36]])
+
+        chunks = list(
+            chunk_text(
+                document,
+                source_id="doc",
+                min_tokens=31,
+                max_tokens=49,
+                overlap_ratio=0.3,
+                count_tokens=self._count,
+            )
+        )
+
+        assert len(chunks) > 1
+        for earlier, later in zip(chunks, chunks[1:]):
+            contained = (
+                later.start_char >= earlier.start_char
+                and later.end_char <= earlier.end_char
+            )
+            assert not contained, (
+                f"chunk {later.chunk_index} adds nothing to {earlier.chunk_index}"
+            )
 
 
 class TestOverlap:

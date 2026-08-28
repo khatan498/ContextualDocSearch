@@ -160,11 +160,29 @@ def chunk_text(
         # Hard rule: never breach max_tokens. Close first, then start the next
         # chunk with the overlap tail already in place.
         if current and current_tokens + segment.token_count > max_tokens:
-            yield _build_chunk(text, current, source_id, chunk_index, count_tokens)
-            chunk_index += 1
-            current = _overlap_tail(current, overlap_budget)
-            current_tokens = sum(item.token_count for item in current)
+            if segments_since_emit > 0:
+                yield _build_chunk(text, current, source_id, chunk_index, count_tokens)
+                chunk_index += 1
+                current = _overlap_tail(current, overlap_budget)
+                current_tokens = sum(item.token_count for item in current)
+            else:
+                # Nothing new has been added since the last emit, so `current`
+                # is pure overlap tail. Publishing it would republish text
+                # already wholly inside the previous chunk — wasted index
+                # space, and the same passage competing with itself in results.
+                # The same guard protects the final chunk below.
+                current = []
+                current_tokens = 0
             segments_since_emit = 0
+
+            # The tail is carried over without regard for what comes next, so it
+            # can leave no room for the very segment that forced this close.
+            # Trim from the front until that segment fits: the oldest text goes
+            # first, because the part nearest the boundary is what overlap
+            # exists to preserve. Without this the next chunk can reach roughly
+            # twice max_tokens, and the embedding model truncates it silently.
+            while current and current_tokens + segment.token_count > max_tokens:
+                current_tokens -= current.pop(0).token_count
 
         current.append(segment)
         current_tokens += segment.token_count

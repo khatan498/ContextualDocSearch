@@ -67,61 +67,79 @@ When implementing:
 - Don't add a chat/LLM-answer layer — this is v1, search-only
 
 ## Current Phase
-Phase 1 complete — demo-corpus ingestion (LocalFSConnector, loaders, chunking)
-plus the demo/personal mode split. Next: Phase 2 — embeddings + vector store +
-BM25 index over the sample corpus.
+Phase 2 complete — both indexes build over the demo corpus. Next: Phase 3 —
+reciprocal rank fusion over the two result lists, then cross-encoder reranking.
 
-Carried into Phase 2 — these are one decision, not two:
+What Phase 2 delivered:
+- app/indexing/embeddings.py — bge-base-en-v1.5 behind a TextEmbedder Protocol,
+  so tests inject a fake and stay offline
+- app/indexing/keyword_index.py — BM25 persisted as JSON, rebuilt on load
+- app/indexing/vector_store.py — Chroma, cosine, deterministic chunk ids
+- app/indexing/hits.py — IndexHit, the shape both indexes return
+- scripts/build_index.py — builds both; `--verify "query"` is a diagnostic that
+  prints each index's hits separately, never a fused result
 
-1. Pass the embedding model's real tokenizer as chunk_text's count_tokens in
-   scripts/build_index.py. Keep estimate_tokens as the signature default so the
-   test suite stays offline and fast.
-2. Assert `chunk_max_tokens <= model.max_seq_length` at startup. Embedding
-   models silently truncate longer input — all-MiniLM-L6-v2 caps at 256,
-   bge-base-en-v1.5 at 512, so the default 800 overflows both with no error.
+Both Phase 2 carry-forwards are done: build_index passes the model's real
+tokenizer as chunk_text's count_tokens, and EmbeddingModel raises
+ChunkWindowTooLargeError when chunk_max_tokens exceeds model.max_seq_length.
+That check lives in EmbeddingModel rather than Settings deliberately — reading
+max_seq_length means loading the model, and config must never trigger a 440 MB
+download just to be read.
 
-The assert is only meaningful with (1) in place. It compares *configured* token
-counts against the model limit, so heuristic-driven boundaries can pass the
-assert while individual chunks still overflow. The assert alone gives false
-confidence.
+Measured on the real corpus: 4 documents, 69 chunks, largest 480 tokens (482
+once the model adds special tokens, against its 512 limit).
 
-Why (measured against all-MiniLM-L6-v2's tokenizer, 2026-08-25): estimate_tokens
-under-counts by ~12% on a realistic mixed document, and by 44-74% on table rows,
-dates, currency, serial numbers, and non-English text. It over-counts on plain
-prose (+22%), which is the harmless direction. Under-counting is the dangerous
-one, and the error concentrates in exactly the chunks holding the precise facts
-a query is usually after — amounts, dates, reference numbers. Tokenizer load
-from cache is ~1.6s and happens at index time, not query time, so the cost is
-not a reason to avoid it.
+Carried into Phase 3:
+1. Fuse with RRF on *rank*, not score. Cosine similarity sits in [-1, 1] while
+   BM25 is unbounded and corpus-relative; the two are deliberately not
+   normalised against each other. app/indexing/hits.py explains this.
+2. BM25 needs a real corpus to behave. BM25Okapi's IDF is
+   log(N - n + 0.5) - log(n + 0.5), which is exactly 0 for a term appearing in
+   one of two documents — so on tiny corpora every term scores zero and is
+   filtered out. Write fusion tests against a corpus of four or more chunks.
+3. Common query words drag BM25 badly. "how long is the warranty" ranks an
+   unrelated clause above Warranty Forms.pdf on BM25 alone, while the vector
+   index gets it right. This is the case fusion has to fix, and a good
+   regression test for Phase 3.
 
 ## Known Chunking Behaviours
-Measured 2026-08-25 against app/ingestion/chunking.py using estimate_tokens.
-Current behaviour, not bugs — recorded as a baseline for retrieval tuning in
-Phase 3. Changing any of these needs a test (see Testing).
+Re-measured 2026-08-28 against the fixed packer and the 350/480 defaults, using
+estimate_tokens. Current behaviour, not bugs — a baseline for retrieval tuning
+in Phase 3. Changing any of these needs a test (see Testing).
 
-Distinct from README's "Known issues", which lists genuine defects to fix
-(chunks exceeding max_tokens, duplicate chunks). The three below are intended
-behaviour that is merely surprising; do not "fix" them without a decision.
+Two defects that used to sit here were fixed at the start of Phase 2 and are now
+covered by TestPackerRegressions in tests/test_chunking.py: chunks could reach
+1.81x chunk_max_tokens, and a chunk could be emitted holding nothing but
+carried-over overlap. Both came from re-seeding a chunk with the overlap tail
+without re-checking what that tail cost or whether it held anything new.
 
-Root cause of (2) and (3): overlap is quantised to whole segments — normally
-paragraphs — so it can never be finer-grained than the paragraphs it is cut from.
+Root cause of (2), (3) and (4): overlap is quantised to whole segments —
+normally paragraphs — so it can never be finer-grained than what it is cut from.
 
 1. Chunks settle near chunk_min_tokens, not chunk_max_tokens. The packer closes
-   at the first paragraph break past min, so min is the attractor and max is only
-   a ceiling. Measured: 500/800 defaults over ~68-token paragraphs produced every
-   full chunk at 562 tokens, never near 800.
+   at the first paragraph break past min, so min is the attractor and max only a
+   ceiling. Measured: 350/480 defaults over ~58-token paragraphs produced every
+   full chunk at 359 tokens, never near 480.
    Lever: raise CHUNK_MIN_TOKENS to get larger chunks.
 
 2. A chunk made of a single segment gets zero overlap. _overlap_tail returns []
-   when len(segments) <= 1; this is required for forward progress, since a tail
-   as long as the chunk would restart the next chunk at the same offset. So a
-   document whose paragraphs each exceed chunk_min_tokens gets no overlap at all.
-   Measured: 676-token paragraphs at 500/800 gave 0/5 boundaries overlapping,
-   versus 5/5 for 68-token paragraphs.
-   Lever: set CHUNK_MIN_TOKENS above the document's typical paragraph size so a
-   chunk always spans more than one paragraph.
+   when len(segments) <= 1; that is required for forward progress, since a tail
+   as long as the chunk would restart the next chunk at the same offset.
+   Less prevalent under the tighter 480 ceiling than it was under 800: a
+   paragraph over max is split into sentences, so the chunk spans several
+   segments and overlap returns. Measured on 572-token paragraphs: 0/5
+   boundaries overlapped at 500/800, but 5/11 at 350/480.
+   Lever: keep CHUNK_MAX_TOKENS below the document's typical paragraph size, or
+   CHUNK_MIN_TOKENS above it — either makes a chunk span more than one segment.
 
-3. Where overlap does occur it can far exceed chunk_overlap_ratio. The tail's
-   first segment is appended unconditionally, so one large paragraph is repeated
-   whole. Measured: a 240-token budget produced a 676-token overlap — 2.8x over.
-   Treat the ratio as a target, not a cap: index size can exceed the nominal +15%.
+3. Where overlap does occur it can still exceed chunk_overlap_ratio. The tail's
+   first segment is appended regardless of the budget, so one large paragraph is
+   repeated whole. Measured: a 240-token budget produced a 575-token overlap,
+   2.4x over. Treat the ratio as a target, not a cap — index size can run above
+   the nominal +15%.
+
+4. Overlap is dropped where it will not fit. When the carried-over tail leaves
+   no room for the segment that forced the chunk to close, the tail is trimmed
+   from the front and may be discarded entirely, so that boundary has reduced or
+   no overlap. This is the trade the max_tokens guarantee is bought with:
+   silently truncated text is worse than a boundary without overlap.
