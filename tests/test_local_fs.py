@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from app.ingestion.connectors.base import DocumentMetadata, SourceConnector
+from app.config import get_settings
+from app.ingestion.document import DocumentMetadata
 from app.ingestion.connectors.local_fs import LocalFSConnector
 
 FILE_ATTRIBUTE_HIDDEN = 0x02
@@ -25,11 +26,15 @@ def titles(connector: LocalFSConnector) -> set[str]:
 
 
 class TestInterface:
-    def test_is_a_source_connector(self) -> None:
-        assert issubclass(LocalFSConnector, SourceConnector)
-
     def test_source_type(self, tmp_path: Path) -> None:
         assert LocalFSConnector(tmp_path).source_type == "local_fs"
+
+    def test_defaults_to_the_bundled_demo_corpus(self) -> None:
+        # The scope rule is that the app only ever reads sample_docs_path;
+        # defaulting here is what makes that true without every call site
+        # having to remember it.
+        expected = Path(get_settings().sample_docs_path).expanduser().resolve()
+        assert LocalFSConnector().root == expected
 
     def test_iter_documents_is_lazy(self, tmp_path: Path) -> None:
         write(tmp_path / "a.txt")

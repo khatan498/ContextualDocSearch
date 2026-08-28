@@ -6,7 +6,7 @@ import docx
 import pytest
 from pypdf import PdfWriter
 
-from app.ingestion.connectors.base import DocumentMetadata
+from app.ingestion.document import DocumentMetadata
 from app.ingestion.loaders import DocumentLoadError, extract_text
 
 

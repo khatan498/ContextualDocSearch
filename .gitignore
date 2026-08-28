@@ -13,7 +13,8 @@ env/
 .env.*
 !.env.example
 
-# Credential files (Google OAuth desktop flow + service accounts)
+# Credential files. None are used in demo mode — kept so that a key can
+# never be committed by accident if personal mode ever lands.
 credentials.json
 client_secret*.json
 service-account*.json

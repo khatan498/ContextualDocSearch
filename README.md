@@ -1,12 +1,14 @@
 # ContextualDocSearch
 
-Hybrid (keyword + vector) search over your own documents — local files today,
-Google Drive later. Built for the kind of paperwork that actually piles up:
-contracts, tax documents, warranties, manuals.
+Hybrid (keyword + vector) search over a small set of sample documents bundled with
+the repo — contracts, service agreements, a sublease, and warranty forms.
 
-Ask *"how long is the warranty on the dishwasher"* and get back the paragraph that
-says *"coverage period: 24 months from date of purchase"* — even though it shares no
+Ask *"how long is the warranty"* and get back the paragraph that says
+*"coverage period: 24 months from date of purchase"* — even though it shares no
 keywords with the question.
+
+**This is a demo.** It searches the documents in `data/sample_docs/` and nothing
+else. Connecting your own files is a planned future release — see [Modes](#modes).
 
 > ## Work in progress — not usable as a search engine yet
 >
@@ -21,9 +23,9 @@ keywords with the question.
 
 ## What works now
 
-Point it at a folder and it will:
+Ingestion over the bundled sample documents:
 
-- **Walk the directory tree** recursively, skipping hidden files and directories
+- **Walk the corpus directory** recursively, skipping hidden files and directories
   (including Windows hidden-attribute files), unsupported types, and anything over a
   configurable size limit.
 - **Extract plain text** from `.pdf`, `.docx`, and `.txt`, including **DOCX table
@@ -31,9 +33,11 @@ Point it at a folder and it will:
 - **Split that text into overlapping, size-bounded chunks**, each carrying its source
   identifier, position in the document, and character offsets.
 - **Skip and log** unreadable files rather than aborting the run, so one corrupt PDF
-  does not kill a scan of ten thousand documents.
+  does not kill the whole scan.
+- **Refuse to start in personal mode**, explaining what that mode will eventually do
+  rather than failing obscurely.
 
-73 tests cover this, and they run offline in about a second.
+100 tests cover this, and they run offline in about a second.
 
 ## What is planned
 
@@ -44,10 +48,29 @@ Point it at a folder and it will:
   fusion, then rerank with a cross-encoder. Vector similarity alone is never the
   final answer.
 - **A search API and UI** — a FastAPI endpoint and a Streamlit front end.
-- **Google Drive as a source**, alongside the local filesystem.
 
 Out of scope for v1: any chat or LLM answer-synthesis layer. This is search — it
-returns passages, not generated answers.
+returns passages, not generated answers. Personal mode — searching your own files
+through a connected cloud drive — is also a future release, not part of v1.
+
+---
+
+## Modes
+
+| Mode | Status | What it searches |
+|---|---|---|
+| `demo` | **Working**, and the default | The documents in `data/sample_docs/`, committed to this repo |
+| `personal` | **Not implemented** | Would search your own files through a connected cloud drive |
+
+Setting `APP_MODE=personal` makes the app refuse to start, with:
+
+> This build is demo-only and searches a fixed set of sample documents bundled with
+> the app. A future release will add personal mode, letting you connect your own
+> cloud drives (Google Drive, OneDrive) and search your own files.
+
+There is no cloud connector and no credential handling in this build at all. It
+cannot reach your files — hosted or local — because it only ever reads its own
+sample corpus.
 
 ---
 
@@ -72,24 +95,22 @@ cp .env.example .env               # Windows: copy .env.example .env
 ```
 
 Every setting has a working default, so `.env` is optional until you want to change
-chunk sizes or wire up Google Drive. See [`.env.example`](.env.example) for what is
-tunable.
+chunk sizes. See [`.env.example`](.env.example) for what is tunable.
 
 ## Trying the ingestion pipeline
 
-This is the only working entry point right now. Drop a few `.pdf`, `.docx`, or
-`.txt` files into `data/sample_docs/`, then save the following at the **repo root**
-and run it from there — the project is not yet pip-installable, so `app` is only
-importable when the repo root is your working directory:
+This is the only working entry point right now. The sample documents are already in
+`data/sample_docs/`, so there is nothing to add. Save the following at the **repo
+root** and run it from there — the project is not yet pip-installable, so `app` is
+only importable when the repo root is your working directory:
 
 ```python
-from pathlib import Path
-
 from app.ingestion.chunking import chunk_text
 from app.ingestion.connectors.local_fs import LocalFSConnector
 from app.ingestion.loaders import DocumentLoadError, extract_text
 
-connector = LocalFSConnector(Path("data/sample_docs"))
+# No argument: the connector defaults to the bundled demo corpus.
+connector = LocalFSConnector()
 
 for raw_bytes, metadata in connector.iter_documents():
     try:
@@ -105,7 +126,7 @@ for raw_bytes, metadata in connector.iter_documents():
 ## Tests
 
 ```bash
-pytest              # 73 tests, about 1 second, no network required
+pytest              # 100 tests, about 1 second, no network required
 ```
 
 Chunking tests use a word-based token estimate rather than a real tokenizer, which
@@ -119,11 +140,11 @@ corresponding test.
 ```
 app/
 ├── config.py                    working — typed settings (pydantic-settings, .env)
+├── modes.py                     working — demo/personal modes, and the message
 ├── ingestion/
+│   ├── document.py              working — DocumentMetadata
 │   ├── connectors/
-│   │   ├── base.py              working — SourceConnector ABC + DocumentMetadata
-│   │   ├── local_fs.py          working — recursive walk, skip rules
-│   │   └── google_drive.py      planned
+│   │   └── local_fs.py          working — recursive walk, skip rules
 │   ├── loaders.py               working — PDF/DOCX/TXT to plain text
 │   └── chunking.py              working — overlapping, size-bounded chunks
 ├── indexing/                    planned — embeddings, vector store, BM25
@@ -131,6 +152,7 @@ app/
 └── api/main.py                  planned — search endpoint
 ui/streamlit_app.py              planned — search UI
 scripts/build_index.py           planned — index builder
+data/sample_docs/                the demo corpus (4 documents)
 ```
 
 The working part of the pipeline is a straight line:
@@ -141,10 +163,13 @@ LocalFSConnector → (bytes, DocumentMetadata) → extract_text() → str → ch
 
 ### Design decisions worth knowing
 
-**Every source hides behind `SourceConnector`.** Connectors yield
-`(bytes, DocumentMetadata)` and nothing else. `DocumentMetadata.source_id` is
-deliberately not named `path`: Drive has opaque file ids and no paths, and calling
-it `path` would bake a filesystem assumption into the shared interface.
+**No source abstraction, deliberately.** An earlier design put a `SourceConnector`
+interface in front of every source so local files and cloud drives would look
+identical. With the scope cut to demo-only there is exactly one source, so
+`LocalFSConnector` is a plain concrete class and the interface was removed rather
+than kept as ceremony. `DocumentMetadata.source_id` keeps its generic name instead
+of becoming `path`, so it stays accurate if personal mode brings a second source
+back.
 
 **Chunks overlap by about 15%.** A hard cut lands mid-thought. If one chunk ends
 with "…the manufacturer's warranty expires" and the next begins "after 24 months…",
@@ -185,16 +210,21 @@ Found by randomised invariant testing. The existing unit tests do not catch thes
   `conftest.py` puts it on `sys.path`.
 - **No upper version bounds** in `requirements.txt`, so a future breaking release of
   a dependency can break a fresh install.
+- **Garbled PDFs extract silently.** A PDF with no ToUnicode CMap yields mojibake
+  instead of text, and `extract_text()` does not raise — so skip-and-log never fires
+  and the junk would reach the index. One sample document hit this and was removed
+  from the corpus. Detecting it is a Phase 2 follow-up.
 - **No CI**, and no `LICENSE` file yet — see below.
 
 ## A note on privacy
 
-Connectors read whatever directory you point them at, and everything stays on your
-machine: embeddings run locally through `sentence-transformers`, with no external API
-calls. `.gitignore` covers `.env`, credential files, and the built index.
+The app reads the documents bundled in `data/sample_docs/` and nothing else. There
+is no cloud connector, no credential handling, and no upload path in this build, so
+it cannot reach your own files whether you run it locally or deploy it.
 
-If this is ever deployed publicly it must only ever index `data/sample_docs/` — never
-real local paths or Drive credentials.
+Everything stays on your machine regardless: embeddings will run locally through
+`sentence-transformers`, with no external API calls. `.gitignore` covers `.env` and
+the built index.
 
 ## License
 

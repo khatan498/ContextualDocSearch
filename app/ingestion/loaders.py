@@ -15,7 +15,7 @@ from docx.opc.exceptions import PackageNotFoundError
 from pypdf import PdfReader
 from pypdf.errors import DependencyError, PyPdfError
 
-from app.ingestion.connectors.base import DocumentMetadata
+from app.ingestion.document import DocumentMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -161,8 +161,8 @@ def extract_text(data: bytes, metadata: DocumentMetadata) -> str:
     """Extract plain text from a document's bytes.
 
     Args:
-        data: Raw document bytes, as yielded by a
-            :class:`~app.ingestion.connectors.base.SourceConnector`.
+        data: Raw document bytes, as yielded by
+            :meth:`~app.ingestion.connectors.local_fs.LocalFSConnector.iter_documents`.
         metadata: Document metadata; ``extension`` selects the loader.
 
     Returns:

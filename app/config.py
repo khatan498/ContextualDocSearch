@@ -6,10 +6,12 @@ Every tunable value in the project lives here. Nothing else should read
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Self
+from typing import Self
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.modes import PERSONAL_MODE_MESSAGE, AppMode, PersonalModeUnavailableError
 
 
 class Settings(BaseSettings):
@@ -34,8 +36,16 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    # --- Mode ------------------------------------------------------------
+    # StrEnum members are strings, so a plain `APP_MODE=demo` line in .env
+    # converts with no custom parsing. `personal` is accepted by the type and
+    # then rejected below, so the user gets the explanation rather than
+    # "not a valid enumeration member".
+    app_mode: AppMode = AppMode.DEMO
+
     # --- Sources ---------------------------------------------------------
-    google_drive_credentials_path: Path | None = None
+    # The bundled demo corpus. This is the only content the app ever reads.
+    sample_docs_path: Path = Path("data/sample_docs")
 
     # --- Storage ---------------------------------------------------------
     vector_store_path: Path = Path("data/index")
@@ -51,22 +61,21 @@ class Settings(BaseSettings):
     chunk_max_tokens: int = Field(default=800, gt=0)
     chunk_overlap_ratio: float = Field(default=0.15, ge=0.0, lt=1.0)
 
-    @field_validator("google_drive_credentials_path", mode="before")
-    @classmethod
-    def _blank_path_is_none(cls, value: Any) -> Any:
-        """Treat an empty env var as "not configured".
+    @model_validator(mode="after")
+    def _reject_personal_mode(self) -> Self:
+        """Refuse to start in personal mode.
 
-        ``.env.example`` ships ``GOOGLE_DRIVE_CREDENTIALS_PATH=`` with no value.
-        Without this, pydantic would coerce that empty string into ``Path("")``,
-        which silently equals ``Path(".")`` — the current directory — and the
-        Drive connector would think it had been given a credentials file.
+        Personal mode is advertised but not implemented. Failing at startup —
+        rather than somewhere deep inside a scan — means the app never
+        half-starts in a mode it cannot honour.
 
-        ``mode="before"`` runs this ahead of type conversion, while the value is
-        still the raw string from the environment.
+        Raises a plain ``RuntimeError`` subclass rather than ``ValueError``, so
+        pydantic lets it through untouched instead of folding it into a
+        ``ValidationError`` and burying the explanation.
         """
-        if isinstance(value, str) and not value.strip():
-            return None
-        return value
+        if self.app_mode is AppMode.PERSONAL:
+            raise PersonalModeUnavailableError(PERSONAL_MODE_MESSAGE)
+        return self
 
     @model_validator(mode="after")
     def _check_chunk_bounds(self) -> Self:

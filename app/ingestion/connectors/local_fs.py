@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app.config import get_settings
-from app.ingestion.connectors.base import DocumentMetadata, SourceConnector
+from app.ingestion.document import DocumentMetadata
 
 # One logger per module, named after the module. Configuring logging is the
 # application's job (scripts/, api/) — libraries just emit.
@@ -23,11 +23,13 @@ logger = logging.getLogger(__name__)
 SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({".pdf", ".docx", ".txt"})
 
 
-class LocalFSConnector(SourceConnector):
+class LocalFSConnector:
     """Yields documents found under a local directory tree.
 
     Args:
-        root: Directory to scan recursively.
+        root: Directory to scan recursively. Defaults to the configured
+            ``SAMPLE_DOCS_PATH`` — the bundled demo corpus, which is the only
+            content the app reads in demo mode. Tests pass their own root.
         max_file_size_bytes: Skip files larger than this. Defaults to the
             configured ``MAX_FILE_SIZE_BYTES``.
         supported_extensions: Lowercased extensions to accept, including the
@@ -36,7 +38,7 @@ class LocalFSConnector(SourceConnector):
 
     def __init__(
         self,
-        root: Path,
+        root: Path | None = None,
         *,
         max_file_size_bytes: int | None = None,
         supported_extensions: frozenset[str] | None = None,
@@ -46,7 +48,12 @@ class LocalFSConnector(SourceConnector):
         # anonymous positional numbers/booleans appearing at call sites.
         settings = get_settings()
 
-        self._root = Path(root).expanduser().resolve()
+        # Defaulting to the demo corpus keeps the scope rule ("the app only
+        # ever reads sample_docs_path") true by construction rather than by
+        # every call site remembering to pass it.
+        self._root = Path(
+            root if root is not None else settings.sample_docs_path
+        ).expanduser().resolve()
         # `if x is not None` rather than `or`: a caller passing 0 is a
         # legitimate (if useless) limit, and `0 or default` would silently
         # replace it with the default. This trips people up constantly.
@@ -63,7 +70,12 @@ class LocalFSConnector(SourceConnector):
 
     @property
     def source_type(self) -> str:
-        """See :class:`SourceConnector`."""
+        """Identifier stamped onto every document's metadata.
+
+        Returns:
+            Always ``"local_fs"``; the local filesystem is the only source
+            while the app is demo-only.
+        """
         return "local_fs"
 
     @property
