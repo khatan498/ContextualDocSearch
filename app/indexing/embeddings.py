@@ -94,14 +94,48 @@ class EmbeddingModel:
         )
         self._batch_size = settings.embedding_batch_size
 
-        logger.info("Loading embedding model %s", self._name)
-        self._model: SentenceTransformer = SentenceTransformer(self._name)
+        self._model: SentenceTransformer = self._load(SentenceTransformer, self._name)
         self._silence_length_warning()
 
         ceiling = (
             settings.chunk_max_tokens if max_chunk_tokens is None else max_chunk_tokens
         )
         self._assert_chunks_fit(ceiling)
+
+    @staticmethod
+    def _load(factory: type["SentenceTransformer"], name: str) -> "SentenceTransformer":
+        """Load the model from the local cache, downloading only if it is absent.
+
+        Left to its defaults, the Hugging Face client contacts huggingface.co
+        on *every* load to check whether the cached files are still current —
+        33 requests per load, measured, even with the model fully cached. No
+        document or query text is ever in them, but they are network traffic
+        the project promises not to make, and they slow startup and make it
+        depend on the network being up.
+
+        ``local_files_only=True`` forbids that. When the model genuinely is not
+        cached it raises ``OSError`` immediately, still without touching the
+        network, and only then is a normal (downloading) load attempted.
+
+        Args:
+            factory: The ``SentenceTransformer`` class. Passed in rather than
+                imported here so the deferred import stays in one place.
+            name: Hugging Face model id.
+
+        Returns:
+            The loaded model.
+        """
+        try:
+            model = factory(name, local_files_only=True)
+            logger.info("Loaded embedding model %s from local cache", name)
+            return model
+        except OSError:
+            # EAFP — "easier to ask forgiveness than permission" — is the
+            # idiomatic Python pattern here: try the cheap path and handle its
+            # failure, rather than first checking whether the cache is complete.
+            # Checking first would duplicate the library's own cache logic.
+            logger.info("Embedding model %s not cached; downloading (first run)", name)
+            return factory(name)
 
     @staticmethod
     def _silence_length_warning() -> None:

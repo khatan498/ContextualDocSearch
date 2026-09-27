@@ -19,14 +19,17 @@ from pathlib import Path
 # suite solves the same problem through the root conftest.py.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from pydantic import ValidationError  # noqa: E402
+
 from app.config import get_settings  # noqa: E402
-from app.indexing.embeddings import EmbeddingModel  # noqa: E402
+from app.indexing.embeddings import ChunkWindowTooLargeError, EmbeddingModel  # noqa: E402
 from app.indexing.hits import IndexHit  # noqa: E402
 from app.indexing.keyword_index import KeywordIndex  # noqa: E402
 from app.indexing.vector_store import VectorStore  # noqa: E402
 from app.ingestion.chunking import Chunk, chunk_text  # noqa: E402
 from app.ingestion.connectors.local_fs import LocalFSConnector  # noqa: E402
 from app.ingestion.loaders import DocumentLoadError, extract_text  # noqa: E402
+from app.modes import PersonalModeUnavailableError  # noqa: E402
 
 logger = logging.getLogger("build_index")
 
@@ -218,9 +221,25 @@ def main(argv: list[str] | None = None) -> int:
     for noisy in ("chromadb", "sentence_transformers", "httpx"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
-    if args.verify:
-        return verify(args.verify, args.k)
-    return build()
+    # These are deliberate refusals, each carrying a message written for the
+    # person running the command. A traceback buries that message under
+    # thirty lines of pydantic internals, so they are printed on their own.
+    # Anything else still raises with a full traceback: an unexpected error is
+    # a bug, and the traceback is what finding it needs.
+    #
+    # A tuple after `except` catches any of the listed types — the equivalent
+    # of C#'s `catch (Exception e) when (e is A || e is B)`.
+    try:
+        if args.verify:
+            return verify(args.verify, args.k)
+        return build()
+    except (PersonalModeUnavailableError, ChunkWindowTooLargeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except ValidationError as exc:
+        # pydantic's own formatting already names each bad setting and why.
+        print(f"error: invalid configuration\n{exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

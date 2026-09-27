@@ -52,7 +52,7 @@ Then build two indexes over those chunks:
 - **Store a BM25 keyword index** as plain JSON — inspectable, and portable across
   library versions in a way a pickle would not be.
 
-175 tests cover this, and the default run is offline in about two seconds.
+202 tests cover this, and the default run is offline in about two seconds.
 
 ## What is planned
 
@@ -184,7 +184,7 @@ for raw_bytes, metadata in connector.iter_documents():
 ## Tests
 
 ```bash
-pytest                    # 175 tests, about 2 seconds, no network required
+pytest                    # 202 tests, about 2 seconds, no network required
 pytest -m integration     # 2 more that load the real model
 ```
 
@@ -281,9 +281,16 @@ its own list and never compares the raw numbers.
   returns empty text without raising.
 - **Not pip-installable.** There is no `pyproject.toml`, so `import app` only works
   with the repo root as the working directory. Tests pass only because the root
-  `conftest.py` puts it on `sys.path`.
+  `conftest.py` puts it on `sys.path`, and `scripts/build_index.py` adds it itself.
+  Configured *data* paths are unaffected: `sample_docs_path`, `vector_store_path` and
+  `.env` resolve against the repo root, so the script works from any directory.
 - **No upper version bounds** in `requirements.txt`, so a future breaking release of
   a dependency can break a fresh install.
+- **AES-encrypted PDFs are skipped.** Encrypted PDFs that open without a password —
+  forms locked only against printing or editing — are read, but only when they use
+  the older RC4 scheme. AES needs the optional `cryptography` package, which is
+  deliberately not installed; those files are skipped with a message saying so.
+  PDFs that genuinely require a password are always skipped.
 - **Garbled PDFs extract silently.** A PDF with no ToUnicode CMap yields mojibake
   instead of text, and `extract_text()` does not raise — so skip-and-log never fires
   and the junk reaches the index. One sample document hit this and was removed from
@@ -302,7 +309,10 @@ it cannot reach your own files whether you run it locally or deploy it.
 
 Everything stays on your machine: embeddings are computed locally through
 `sentence-transformers`, with no external API calls. The only network access is the
-one-time model download from Hugging Face on the first index build; Chroma's usage
+one-time model download from Hugging Face on the first index build. After that the
+model is loaded strictly from the local cache (`local_files_only=True`) — left to its
+defaults, the Hugging Face client would otherwise send dozens of requests to
+huggingface.co on every load to check the cached files are current. Chroma's usage
 telemetry is switched off explicitly. `.gitignore` covers `.env` and the built index.
 
 ## License

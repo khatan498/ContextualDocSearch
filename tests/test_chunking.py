@@ -81,12 +81,38 @@ class TestSizeWindow:
         assert chunks
         assert all(c.token_count <= WINDOW["max_tokens"] for c in chunks)
 
-    def test_every_chunk_but_the_last_reaches_min_tokens(self) -> None:
+    def test_uniform_paragraphs_fill_every_chunk_but_the_last_to_min(self) -> None:
+        # Holds for small, even paragraphs like these — NOT in general. See the
+        # next test: a chunk can close below min_tokens when the next segment
+        # will not fit. On the real corpus 10 of 69 chunks do.
         chunks = list(chunk_text(make_document(), source_id="doc", **WINDOW))
 
         assert len(chunks) > 1
         # The final chunk is whatever remains and may legitimately be short.
         assert all(c.token_count >= WINDOW["min_tokens"] for c in chunks[:-1])
+
+    def test_chunk_closes_below_min_when_the_next_segment_will_not_fit(self) -> None:
+        # max_tokens is a hard limit and min_tokens a target; when they
+        # conflict, max wins. 60 tokens sits below min=100, but adding the next
+        # 100-token paragraph would reach 160, past max=120 — so the chunk
+        # closes at 60. Pinned so this reads as intended, not as a bug.
+        def paragraph(words: int, tag: str) -> str:
+            return " ".join(f"{tag}{i}" for i in range(words)) + "."
+
+        document = "\n\n".join([paragraph(60, "a"), paragraph(100, "b")])
+
+        chunks = list(
+            chunk_text(
+                document,
+                source_id="doc",
+                min_tokens=100,
+                max_tokens=120,
+                overlap_ratio=0.0,
+                count_tokens=lambda text: len(text.split()),
+            )
+        )
+
+        assert [c.token_count for c in chunks] == [60, 100]
 
     def test_whole_document_is_covered(self) -> None:
         document = make_document()

@@ -143,6 +143,86 @@ class TestPersistence:
         assert location.is_dir()
 
 
+def segment_dirs(root: Path) -> int:
+    """Chroma keeps each collection's vector index in its own subdirectory."""
+    return sum(1 for entry in root.iterdir() if entry.is_dir())
+
+
+class TestRebuildDoesNotLeak:
+    """Rebuilding must not strand files on disk.
+
+    Dropping a collection leaves its directory behind, and the old
+    implementation dropped on every rebuild: 1, 2, 3 directories after three
+    builds, with only one ever in use.
+    """
+
+    def test_repeated_rebuilds_keep_one_directory(self, tmp_path: Path) -> None:
+        store = VectorStore.open(tmp_path)
+
+        for _ in range(3):
+            store.replace_all(CHUNKS, VECTORS)
+
+        assert segment_dirs(tmp_path) == 1
+        assert store.count() == 3
+
+    def test_reopening_between_rebuilds_keeps_one_directory(
+        self, tmp_path: Path
+    ) -> None:
+        # Real rebuilds are separate runs of build_index.py, each opening the
+        # store fresh — the case the original leak was measured in.
+        for _ in range(3):
+            VectorStore.open(tmp_path).replace_all(CHUNKS, VECTORS)
+
+        assert segment_dirs(tmp_path) == 1
+
+    def test_width_is_recorded(self, store: VectorStore) -> None:
+        store.replace_all(CHUNKS, VECTORS)
+
+        assert store._collection.metadata["embedding_dim"] == 3
+
+    def test_new_embedding_width_rebuilds_cleanly(self, store: VectorStore) -> None:
+        # Switching model changes the width. Clearing in place would keep the
+        # collection locked to the old width and reject every new vector.
+        store.replace_all(CHUNKS, VECTORS)
+        wider = [vector + [0.0] for vector in VECTORS]
+
+        store.replace_all(CHUNKS, wider)
+
+        assert store.count() == 3
+        assert store._collection.metadata["embedding_dim"] == 4
+        assert store.query([1.0, 0.0, 0.0, 0.0])[0].source_id == "warranty.pdf"
+
+    def test_index_built_before_width_tracking_is_upgraded(
+        self, tmp_path: Path
+    ) -> None:
+        # An on-disk index from before this change has no `embedding_dim`.
+        # Its first rebuild must recreate it rather than trust its width.
+        legacy = VectorStore.open(tmp_path)
+        legacy._client.delete_collection(COLLECTION_NAME)
+        legacy._client.create_collection(
+            COLLECTION_NAME, metadata={"hnsw:space": "cosine"}
+        )
+
+        store = VectorStore.open(tmp_path)
+        store.replace_all(CHUNKS, VECTORS)
+
+        assert store._collection.metadata["embedding_dim"] == 3
+        assert store.count() == 3
+
+    def test_cosine_distance_survives_recreation(self, store: VectorStore) -> None:
+        store.replace_all(CHUNKS, VECTORS)
+        store.replace_all(CHUNKS, [vector + [0.0] for vector in VECTORS])
+
+        assert store._collection.metadata["hnsw:space"] == "cosine"
+
+    def test_emptying_a_populated_store(self, store: VectorStore) -> None:
+        store.replace_all(CHUNKS, VECTORS)
+
+        store.replace_all([], [])
+
+        assert store.count() == 0
+
+
 class TestInMemoryIsolation:
     def test_each_new_store_starts_empty(self, store: VectorStore) -> None:
         # Chroma shares one in-process system, so without the explicit clear in

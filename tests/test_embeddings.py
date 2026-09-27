@@ -37,8 +37,17 @@ class FakeSentenceTransformer:
 
     limit = 512
     dims = 4
+    # Whether the model is "in the local cache". When False, a load with
+    # local_files_only=True fails the way the real library does: with OSError.
+    cached = True
+    # Every construction attempt, as the local_files_only value it was given.
+    # A list on the class, reset by the fixture, so tests can see the retry.
+    load_attempts: list[bool] = []
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, local_files_only: bool = False) -> None:
+        type(self).load_attempts.append(local_files_only)
+        if local_files_only and not type(self).cached:
+            raise OSError(f"{name} is not in the local cache")
         self.name = name
         self.max_seq_length = type(self).limit
         self.tokenizer = FakeTokenizer()
@@ -69,7 +78,50 @@ def fake_st(monkeypatch: pytest.MonkeyPatch) -> type[FakeSentenceTransformer]:
     module = types.ModuleType("sentence_transformers")
     module.SentenceTransformer = FakeSentenceTransformer  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "sentence_transformers", module)
+    # A fresh list per test; monkeypatch restores the original afterwards.
+    monkeypatch.setattr(FakeSentenceTransformer, "load_attempts", [])
     return FakeSentenceTransformer
+
+
+class TestCacheFirstLoading:
+    """The model loads from disk without contacting huggingface.co.
+
+    Measured before the fix: 33 HTTP requests per load of an already-cached
+    model, purely to check whether the cached files were still current.
+    """
+
+    def test_cached_model_loads_local_only_in_one_attempt(
+        self, fake_st: type[FakeSentenceTransformer]
+    ) -> None:
+        EmbeddingModel("fake/model")
+
+        assert fake_st.load_attempts == [True]
+
+    def test_missing_model_falls_back_to_a_download(
+        self, fake_st: type[FakeSentenceTransformer], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(fake_st, "cached", False)
+
+        model = EmbeddingModel("fake/model")
+
+        # Tried the cache, found nothing, then loaded normally (downloading).
+        assert fake_st.load_attempts == [True, False]
+        assert model.name == "fake/model"
+
+    def test_fallback_is_logged(
+        self,
+        fake_st: type[FakeSentenceTransformer],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # A first-run download is slow and large; saying so is the difference
+        # between "it's downloading" and "it's hung".
+        monkeypatch.setattr(fake_st, "cached", False)
+
+        with caplog.at_level("INFO", logger="app.indexing.embeddings"):
+            EmbeddingModel("fake/model")
+
+        assert "downloading" in caplog.text
 
 
 class TestTruncationGuard:

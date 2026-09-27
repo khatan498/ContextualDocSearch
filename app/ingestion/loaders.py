@@ -12,7 +12,7 @@ from collections.abc import Callable
 
 import docx
 from docx.opc.exceptions import PackageNotFoundError
-from pypdf import PdfReader
+from pypdf import PasswordType, PdfReader
 from pypdf.errors import DependencyError, PyPdfError
 
 from app.ingestion.document import DocumentMetadata
@@ -34,6 +34,39 @@ _TEXT_ENCODINGS: tuple[str, ...] = ("utf-8-sig", "utf-8", "cp1252")
 _EXCESS_BLANK_LINES = re.compile(r"\n{3,}")
 _TRAILING_WHITESPACE = re.compile(r"[ \t]+$", re.MULTILINE)
 
+# pypdf decrypts the older RC4 scheme itself, but AES needs the optional
+# `cryptography` package, which this project deliberately does not install.
+_AES_UNSUPPORTED = (
+    "PDF uses AES encryption, which needs the optional 'cryptography' package; "
+    "it is not installed, so this file is skipped"
+)
+
+
+def _unlock(reader: PdfReader) -> None:
+    """Open an encrypted PDF that needs no password to read.
+
+    Encryption does not always mean a password is needed. Many forms carry an
+    *owner* password only — it restricts printing or editing, while anyone can
+    open and read them, so the "user" password is empty. Those are unlocked
+    here. Only a file that genuinely demands a password is refused.
+
+    Args:
+        reader: A reader over an encrypted PDF.
+
+    Raises:
+        DocumentLoadError: If a password is required, or the encryption is AES.
+    """
+    try:
+        result = reader.decrypt("")
+    except DependencyError as exc:
+        raise DocumentLoadError(_AES_UNSUPPORTED) from exc
+
+    if result == PasswordType.NOT_DECRYPTED:
+        raise DocumentLoadError(
+            "PDF is encrypted and requires a password to open; "
+            "password-protected files are not supported in v1"
+        )
+
 
 def _load_pdf(data: bytes) -> str:
     """Extract text from a PDF.
@@ -45,22 +78,26 @@ def _load_pdf(data: bytes) -> str:
         Page texts joined by blank lines.
 
     Raises:
-        DocumentLoadError: If the file is unparseable or encrypted.
+        DocumentLoadError: If the file is unparseable, needs a password, or
+            uses AES encryption.
     """
     # `io.BytesIO` wraps bytes in a file-like object — a MemoryStream. pypdf
     # wants something with .read()/.seek(), not a bytes object.
     try:
         reader = PdfReader(io.BytesIO(data))
-    except (PyPdfError, DependencyError) as exc:
+    except DependencyError as exc:
+        # pypdf tries an empty password while *opening* an encrypted file, and
+        # AES-256 needs `cryptography` even for that check — so this is where
+        # an AES-256 file fails, before `_unlock` is ever reached.
+        raise DocumentLoadError(_AES_UNSUPPORTED) from exc
+    except PyPdfError as exc:
         # `raise ... from exc` chains the original exception, the same idea as
         # passing an innerException in C#. Without `from`, the original
         # traceback is lost.
         raise DocumentLoadError(f"Could not parse PDF: {exc}") from exc
 
     if reader.is_encrypted:
-        raise DocumentLoadError(
-            "PDF is encrypted; password-protected files are not supported in v1"
-        )
+        _unlock(reader)
 
     pages: list[str] = []
     # `enumerate(x, start=1)` yields (index, item) pairs with a 1-based counter.
@@ -68,7 +105,14 @@ def _load_pdf(data: bytes) -> str:
         try:
             # extract_text() can return None for image-only pages.
             pages.append(page.extract_text() or "")
-        except (PyPdfError, DependencyError) as exc:
+        except DependencyError as exc:
+            # Not a damaged page: the file is AES-encrypted, and every page will
+            # fail identically. AES-128 gets this far because its password check
+            # needs no AES, so decryption "succeeds" and the failure only comes
+            # when content is read. Skipping page by page would return an empty
+            # document with no error at all — worse than refusing the file.
+            raise DocumentLoadError(_AES_UNSUPPORTED) from exc
+        except PyPdfError as exc:
             # One damaged page shouldn't cost us the other 200.
             logger.warning("Skipping unreadable page %d: %s", page_number, exc)
 

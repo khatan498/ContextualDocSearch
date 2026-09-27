@@ -8,10 +8,18 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.modes import PERSONAL_MODE_MESSAGE, AppMode, PersonalModeUnavailableError
+
+# The repository root: this file is app/config.py, so two levels up.
+# `__file__` is the path of the current module — the closest C# analogue is
+# `Assembly.GetExecutingAssembly().Location`. Anchoring on it rather than on the
+# current working directory is what makes every relative path below mean the
+# same thing whether the process starts in the repo root, in scripts/, or
+# wherever a web server decides to launch it.
+PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent
 
 
 class Settings(BaseSettings):
@@ -31,7 +39,10 @@ class Settings(BaseSettings):
     # means unrelated variables already in your environment (PATH, etc.) are
     # skipped rather than raising.
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # Absolute, for the same reason as the paths below: a bare ".env" is
+        # looked up in the working directory, so running from anywhere else
+        # silently ignored your settings and fell back to the defaults.
+        env_file=PROJECT_ROOT / ".env",
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -45,7 +56,13 @@ class Settings(BaseSettings):
 
     # --- Sources ---------------------------------------------------------
     # The bundled demo corpus. This is the only content the app ever reads.
-    sample_docs_path: Path = Path("data/sample_docs")
+    #
+    # Declared relative, then anchored to PROJECT_ROOT by `_anchor_to_root`.
+    # `validate_default=True` is required for that: pydantic trusts default
+    # values and skips validators on them unless told otherwise.
+    sample_docs_path: Path = Field(
+        default=Path("data/sample_docs"), validate_default=True
+    )
 
     # --- Embeddings ------------------------------------------------------
     # Downloaded from Hugging Face on first use and cached under
@@ -60,7 +77,8 @@ class Settings(BaseSettings):
     embedding_batch_size: int = Field(default=32, gt=0)
 
     # --- Storage ---------------------------------------------------------
-    vector_store_path: Path = Path("data/index")
+    # Holds both the Chroma database and the BM25 file. Anchored like above.
+    vector_store_path: Path = Field(default=Path("data/index"), validate_default=True)
 
     # --- Ingestion -------------------------------------------------------
     # `Field(gt=0)` attaches a validation constraint to the field. This is
@@ -75,6 +93,27 @@ class Settings(BaseSettings):
     chunk_min_tokens: int = Field(default=350, gt=0)
     chunk_max_tokens: int = Field(default=480, gt=0)
     chunk_overlap_ratio: float = Field(default=0.15, ge=0.0, lt=1.0)
+
+    # A decorator stack: `@field_validator` registers the method with pydantic,
+    # and `@classmethod` makes it receive the class rather than an instance,
+    # because it runs while the instance is still being built. Decorators apply
+    # bottom-up, so `@classmethod` must sit closest to the function.
+    @field_validator("sample_docs_path", "vector_store_path", mode="after")
+    @classmethod
+    def _anchor_to_root(cls, value: Path) -> Path:
+        """Resolve a relative path against the project root, not the CWD.
+
+        Absolute paths are returned untouched, so an explicit override in
+        ``.env`` or the environment always wins.
+
+        Args:
+            value: The path as declared or as read from the environment,
+                already converted from a string by pydantic.
+
+        Returns:
+            An absolute path.
+        """
+        return value if value.is_absolute() else PROJECT_ROOT / value
 
     @model_validator(mode="after")
     def _reject_personal_mode(self) -> Self:

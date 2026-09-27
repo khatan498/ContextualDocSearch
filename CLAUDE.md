@@ -102,6 +102,19 @@ Carried into Phase 3:
    index gets it right. This is the case fusion has to fix, and a good
    regression test for Phase 3.
 
+Carried into Phase 4 (API) and Phase 5 (UI):
+1. Startup refusals must reach the user as messages. PersonalModeUnavailableError,
+   ChunkWindowTooLargeError and pydantic's ValidationError are deliberate, and
+   each carries text written for a person. scripts/build_index.py main() shows
+   the pattern: catch exactly those, print the message, exit 2; let anything
+   else raise with its traceback. The API must not turn them into a bare 500.
+2. Launch from anywhere is already safe. Data paths and .env resolve against
+   app.config.PROJECT_ROOT, not the working directory, so uvicorn or Streamlit
+   can start from any folder. Do not reintroduce CWD-relative paths.
+3. The model loads offline once cached (local_files_only), and downloads only
+   when absent. A fresh deployment still downloads ~440 MB on first start, so
+   build the index — which caches the model — as part of deploying.
+
 ## Known Chunking Behaviours
 Re-measured 2026-08-28 against the fixed packer and the 350/480 defaults, using
 estimate_tokens. Current behaviour, not bugs — a baseline for retrieval tuning
@@ -143,3 +156,13 @@ normally paragraphs — so it can never be finer-grained than what it is cut fro
    from the front and may be discarded entirely, so that boundary has reduced or
    no overlap. This is the trade the max_tokens guarantee is bought with:
    silently truncated text is worse than a boundary without overlap.
+
+5. A chunk can close below chunk_min_tokens. min is a target and max a hard
+   limit; when they conflict, max wins. If the chunk so far is under min but
+   adding the next segment would breach max, it closes where it is. Measured on
+   the real corpus (2026-09-27, real tokenizer): 10 of 69 non-final chunks sit
+   under 350 tokens, the smallest at 124. Pinned by
+   test_chunk_closes_below_min_when_the_next_segment_will_not_fit.
+   Lever: more headroom between min and max makes it rarer; splitting the
+   incoming segment to top the chunk up would remove it, at the cost of
+   breaking a paragraph that currently survives whole.

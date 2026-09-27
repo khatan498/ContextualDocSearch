@@ -1,13 +1,22 @@
 """Tests for app.ingestion.loaders."""
 
+import importlib.util
 import io
+from pathlib import Path
 
 import docx
 import pytest
-from pypdf import PdfWriter
+from pypdf import PdfReader, PdfWriter
 
 from app.ingestion.document import DocumentMetadata
 from app.ingestion.loaders import DocumentLoadError, extract_text
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+# AES support depends on an optional package the project does not install. The
+# AES tests below assert whichever behaviour matches this environment, so they
+# stay correct if `cryptography` is ever added.
+HAS_CRYPTOGRAPHY = importlib.util.find_spec("cryptography") is not None
 
 
 def make_metadata(extension: str, source_id: str = "doc") -> DocumentMetadata:
@@ -188,7 +197,7 @@ class TestPdf:
         buffer = io.BytesIO()
         writer.write(buffer)
 
-        with pytest.raises(DocumentLoadError, match="encrypted"):
+        with pytest.raises(DocumentLoadError, match="requires a password"):
             extract_text(buffer.getvalue(), make_metadata(".pdf"))
 
     def test_image_only_pdf_yields_empty_text_without_raising(self) -> None:
@@ -199,6 +208,76 @@ class TestPdf:
         writer.write(buffer)
 
         assert extract_text(buffer.getvalue(), make_metadata(".pdf")) == ""
+
+
+def encrypt_pdf(data: bytes, *, user_password: str, algorithm: str = "RC4-128") -> bytes:
+    """Re-save a PDF with encryption applied.
+
+    RC4 needs no optional packages, so these can be generated in-test. AES
+    cannot be written without ``cryptography``; those cases use the committed
+    files in ``tests/fixtures``.
+    """
+    writer = PdfWriter(clone_from=PdfReader(io.BytesIO(data)))
+    writer.encrypt(
+        user_password=user_password, owner_password="owner-only", algorithm=algorithm
+    )
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    return buffer.getvalue()
+
+
+class TestEncryptedPdf:
+    """Encryption does not always mean a password is needed to read.
+
+    Legal and government forms are often locked with an *owner* password only:
+    anyone can open and read them, and the encryption merely restricts printing
+    or editing. Those were rejected outright before this fix.
+    """
+
+    BODY = "Coverage period is 24 months from purchase"
+
+    def test_owner_locked_pdf_is_read(self) -> None:
+        data = encrypt_pdf(build_pdf(self.BODY), user_password="")
+
+        assert self.BODY in extract_text(data, make_metadata(".pdf"))
+
+    def test_pdf_needing_a_password_is_refused_with_a_clear_reason(self) -> None:
+        data = encrypt_pdf(build_pdf(self.BODY), user_password="secret")
+
+        with pytest.raises(DocumentLoadError, match="requires a password"):
+            extract_text(data, make_metadata(".pdf"))
+
+    @pytest.mark.parametrize(
+        "fixture", ["aes128-owner-locked.pdf", "aes256-owner-locked.pdf"]
+    )
+    @pytest.mark.skipif(HAS_CRYPTOGRAPHY, reason="AES is readable when installed")
+    def test_aes_without_cryptography_is_refused_not_emptied(
+        self, fixture: str
+    ) -> None:
+        # The trap this pins: AES-128's password check needs no AES, so the
+        # file "decrypts" and only fails when page text is read. Swallowing
+        # that page by page returned "" with no error — the document vanished
+        # from the index silently. It must be a loud, specific refusal instead.
+        data = (FIXTURES / fixture).read_bytes()
+
+        with pytest.raises(DocumentLoadError, match="cryptography"):
+            extract_text(data, make_metadata(".pdf"))
+
+    @pytest.mark.parametrize(
+        "fixture", ["aes128-owner-locked.pdf", "aes256-owner-locked.pdf"]
+    )
+    @pytest.mark.skipif(not HAS_CRYPTOGRAPHY, reason="needs the cryptography package")
+    def test_aes_is_read_when_cryptography_is_installed(self, fixture: str) -> None:
+        data = (FIXTURES / fixture).read_bytes()
+
+        assert self.BODY in extract_text(data, make_metadata(".pdf"))
+
+    def test_fixtures_really_are_encrypted(self) -> None:
+        # Guards against a fixture being regenerated without encryption, which
+        # would make the AES tests above pass for the wrong reason.
+        for name in ["aes128-owner-locked.pdf", "aes256-owner-locked.pdf"]:
+            data = (FIXTURES / name).read_bytes()
+            assert b"/Encrypt" in data, name
 
 
 class TestDispatch:

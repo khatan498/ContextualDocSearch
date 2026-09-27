@@ -220,3 +220,76 @@ class TestMain:
 
         assert build_index.main([]) == 0
         assert called == [True]
+
+
+@pytest.fixture
+def fresh_settings():
+    """Clear the cached Settings before and after, so env changes take effect
+    here and cannot leak into any other test."""
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+class TestRefusalsAreMessagesNotTracebacks:
+    """Deliberate refusals print their message and exit 2.
+
+    Before this, `APP_MODE=personal python scripts/build_index.py` printed a
+    full traceback with the explanation buried at the bottom.
+    """
+
+    def test_personal_mode(
+        self,
+        fresh_settings: None,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+    ) -> None:
+        from app.modes import PERSONAL_MODE_MESSAGE
+
+        monkeypatch.setenv("APP_MODE", "personal")
+
+        assert build_index.main(["--verify", "anything"]) == 2
+        err = capsys.readouterr().err
+        assert PERSONAL_MODE_MESSAGE in err
+        assert "Traceback" not in err
+
+    def test_invalid_configuration(
+        self,
+        fresh_settings: None,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+    ) -> None:
+        monkeypatch.setenv("CHUNK_MIN_TOKENS", "900")
+        monkeypatch.setenv("CHUNK_MAX_TOKENS", "100")
+
+        assert build_index.main(["--verify", "anything"]) == 2
+        err = capsys.readouterr().err
+        # pydantic's message names the settings at fault.
+        assert "invalid configuration" in err
+        assert "chunk_min_tokens" in err
+
+    def test_chunk_window_too_large_for_the_model(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        from app.indexing.embeddings import ChunkWindowTooLargeError
+
+        def refuse() -> int:
+            raise ChunkWindowTooLargeError("CHUNK_MAX_TOKENS is 900 but the model reads 512")
+
+        monkeypatch.setattr(build_index, "build", refuse)
+
+        assert build_index.main([]) == 2
+        assert "reads 512" in capsys.readouterr().err
+
+    def test_unexpected_errors_still_raise(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Only the deliberate refusals are softened. A genuine bug must keep
+        # its traceback, or it becomes much harder to find.
+        def broken() -> int:
+            raise RuntimeError("a real bug")
+
+        monkeypatch.setattr(build_index, "build", broken)
+
+        with pytest.raises(RuntimeError, match="a real bug"):
+            build_index.main([])

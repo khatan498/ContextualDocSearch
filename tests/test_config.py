@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from app.config import Settings, get_settings
+from app.config import PROJECT_ROOT, Settings, get_settings
 from app.modes import AppMode, PersonalModeUnavailableError
 
 
@@ -13,7 +13,7 @@ class TestDefaults:
         assert Settings().app_mode is AppMode.DEMO
 
     def test_sample_docs_path(self) -> None:
-        assert Settings().sample_docs_path == Path("data/sample_docs")
+        assert Settings().sample_docs_path == PROJECT_ROOT / "data" / "sample_docs"
 
     def test_chunk_defaults(self) -> None:
         settings = Settings()
@@ -31,6 +31,50 @@ class TestDefaults:
         # This asserts the shipped defaults are a safe pairing; the same check
         # runs against the real model in EmbeddingModel at index time.
         assert Settings().chunk_max_tokens <= 512
+
+
+class TestPathAnchoring:
+    """Relative paths mean "relative to the repo", never "to the CWD".
+
+    Before this, running a script from scripts/ looked for data/index under
+    scripts/ and reported that no index existed — and a web server launched
+    from anywhere else would have done the same.
+    """
+
+    def test_project_root_is_the_repository(self) -> None:
+        assert (PROJECT_ROOT / "app" / "config.py").is_file()
+
+    def test_default_paths_are_absolute(self) -> None:
+        settings = Settings()
+        assert settings.sample_docs_path.is_absolute()
+        assert settings.vector_store_path.is_absolute()
+
+    def test_relative_override_is_anchored_to_the_root(self) -> None:
+        settings = Settings(vector_store_path=Path("data/elsewhere"))
+        assert settings.vector_store_path == PROJECT_ROOT / "data" / "elsewhere"
+
+    def test_absolute_override_is_left_alone(self, tmp_path: Path) -> None:
+        assert Settings(vector_store_path=tmp_path).vector_store_path == tmp_path
+
+    def test_environment_override_is_anchored_too(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("SAMPLE_DOCS_PATH", "data/other_docs")
+        assert Settings().sample_docs_path == PROJECT_ROOT / "data" / "other_docs"
+
+    def test_independent_of_the_working_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The actual failure mode: a different CWD must not move the paths.
+        from_root = Settings()
+        monkeypatch.chdir(tmp_path)
+        from_elsewhere = Settings()
+
+        assert from_elsewhere.sample_docs_path == from_root.sample_docs_path
+        assert from_elsewhere.vector_store_path == from_root.vector_store_path
+
+    def test_env_file_is_read_from_the_root(self) -> None:
+        assert Settings.model_config["env_file"] == PROJECT_ROOT / ".env"
 
 
 class TestScope:
