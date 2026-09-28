@@ -21,7 +21,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pydantic import ValidationError  # noqa: E402
 
+from app.cli import positive_int, silence_model_loading_bars  # noqa: E402
 from app.config import get_settings  # noqa: E402
+from app.indexing.built_index import IndexUnavailableError, open_built_indexes  # noqa: E402
 from app.indexing.embeddings import ChunkWindowTooLargeError, EmbeddingModel  # noqa: E402
 from app.indexing.hits import IndexHit  # noqa: E402
 from app.indexing.keyword_index import KeywordIndex  # noqa: E402
@@ -32,8 +34,6 @@ from app.ingestion.loaders import DocumentLoadError, extract_text  # noqa: E402
 from app.modes import PersonalModeUnavailableError  # noqa: E402
 
 logger = logging.getLogger("build_index")
-
-BM25_FILENAME = "bm25_index.json"
 
 
 def relative_source_id(source_id: str, root: Path) -> str:
@@ -124,8 +124,8 @@ def build() -> int:
     print("embedding...")
     vectors = model.embed_documents([chunk.text for chunk in chunks])
 
-    VectorStore.open().replace_all(chunks, vectors)
-    bm25_path = settings.vector_store_path / BM25_FILENAME
+    VectorStore.open().replace_all(chunks, vectors, model_name=model.name)
+    bm25_path = settings.keyword_index_path
     KeywordIndex.build(chunks).save(bm25_path)
 
     print()
@@ -149,9 +149,10 @@ def _print_hits(title: str, hits: list[IndexHit]) -> None:
 def verify(query: str, k: int) -> int:
     """Query each index separately and print what it returns.
 
-    This is a diagnostic, not the search API. Phase 3 owns retrieval, where the
-    two lists are merged by reciprocal rank fusion and then reranked — the
-    project's rule is that raw vector hits are never returned on their own.
+    This is a diagnostic, not search. Real results come from
+    scripts/search.py, where the two lists are merged by reciprocal rank fusion
+    and then reranked — the project's rule is that raw vector hits are never
+    returned on their own.
 
     Args:
         query: Query text.
@@ -159,22 +160,17 @@ def verify(query: str, k: int) -> int:
 
     Returns:
         Process exit code.
+
+    Raises:
+        IndexUnavailableError: If the indexes are missing, unreadable, or were
+            built with a different embedding model.
     """
-    settings = get_settings()
-    bm25_path = settings.vector_store_path / BM25_FILENAME
-
-    if not bm25_path.exists():
-        print(f"No index at {settings.vector_store_path}. Run without --verify first.")
-        return 1
-
-    store = VectorStore.open()
-    if store.count() == 0:
-        print("Vector store is empty. Run without --verify first.")
-        return 1
-
+    # The same checks search runs, so the diagnostic never queries an index
+    # that search would refuse.
+    keyword_index, store = open_built_indexes()
     model = EmbeddingModel()
 
-    print("[diagnostic - not the search API; Phase 3 fuses these via RRF]")
+    print("[diagnostic - each index on its own; for real results use scripts/search.py]")
     print()
     print(f"query  : {query!r}")
     print(f"indexed: {store.count()} chunks")
@@ -187,7 +183,7 @@ def verify(query: str, k: int) -> int:
     print()
     _print_hits(
         "keyword index (BM25 score, corpus-relative)",
-        KeywordIndex.load(bm25_path).query(query, k=k),
+        keyword_index.query(query, k=k),
     )
     return 0
 
@@ -208,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
         help="query the existing indexes and print each one's hits",
     )
     parser.add_argument(
-        "-k", type=int, default=3, help="hits to show per index (default 3)"
+        "-k", type=positive_int, default=3, help="hits to show per index (default 3)"
     )
     args = parser.parse_args(argv)
 
@@ -220,6 +216,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
     for noisy in ("chromadb", "sentence_transformers", "httpx"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+    silence_model_loading_bars()
 
     # These are deliberate refusals, each carrying a message written for the
     # person running the command. A traceback buries that message under
@@ -233,6 +230,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.verify:
             return verify(args.verify, args.k)
         return build()
+    except IndexUnavailableError as exc:
+        # Only --verify reads an existing index. Exit 1: rebuilding fixes it.
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     except (PersonalModeUnavailableError, ChunkWindowTooLargeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

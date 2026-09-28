@@ -67,8 +67,62 @@ When implementing:
 - Don't add a chat/LLM-answer layer — this is v1, search-only
 
 ## Current Phase
-Phase 2 complete — both indexes build over the demo corpus. Next: Phase 3 —
-reciprocal rank fusion over the two result lists, then cross-encoder reranking.
+Phase 3 complete — search works end to end from the command line. Next: Phase 4
+— the FastAPI search endpoint.
+
+What Phase 3 delivered:
+- app/retrieval/fusion.py — reciprocal_rank_fusion over named IndexHit lists;
+  rank only, raw scores ignored; deterministic tie-break (best rank, then id)
+- app/retrieval/reranker.py — CrossEncoderReranker (ms-marco-MiniLM-L6-v2)
+  behind a Reranker Protocol; score() returns scores in input order, unsorted
+- app/retrieval/results.py — SearchResult, carrying vector_rank/keyword_rank
+- app/retrieval/hybrid_retriever.py — HybridRetriever.open()/search(); one path,
+  no branch skips fusion or reranking
+- app/indexing/built_index.py — open_built_indexes(), the single gate every
+  reader of the indexes goes through. Raises IndexUnavailableError when the
+  index is missing, unreadable, empty, built with a different embedding model,
+  or when the two indexes disagree on chunk count (an interrupted build). All
+  checks run before any model loads
+- The vector store records embedding_model (and embedding_dim) in its
+  collection metadata; replace_all(model_name=...) is required. An index built
+  before this change has no recorded model and is refused until rebuilt
+- app/model_cache.py — load_cache_first, shared by both models (0 HTTP requests
+  on a cached load, measured for both)
+- app/cli.py — positive_int for -k, and silence_model_loading_bars()
+- scripts/search.py — CLI search; blank query and -k < 1 are usage errors
+  (exit 2); IndexUnavailableError -> exit 1; PersonalModeUnavailableError,
+  ChunkWindowTooLargeError, ValidationError -> exit 2
+- Settings: reranker_model_name, retrieval_candidates (20 per index), rrf_k (60),
+  search_top_k (5, must be <= retrieval_candidates), keyword_index_path property
+
+Measured on the real corpus (2026-09-27): the fused shortlist is 20-36 of 69
+chunks; a warm search takes 0.65-1.3 s on CPU, nearly all of it reranking.
+"how long is the warranty" now returns Warranty Forms.pdf first — pinned by an
+integration test that also asserts BM25 alone gets it wrong.
+
+Reranker choice, measured 2026-09-27 on 12 queries whose answer chunk can be
+identified by its text (top-1 chunk contains the answer / warm CPU latency):
+- cross-encoder/ms-marco-MiniLM-L6-v2: 12/12, 0.65-1.3 s, 90 MB — chosen
+- BAAI/bge-reranker-base: 10/12, 4.6-7.8 s, 1.1 GB. Its XLM-R tokenizer counts
+  the largest chunk as 544 tokens, over its 512 window, so chunk tails are cut
+- BAAI/bge-reranker-v2-m3: 12/12, 13-29 s, 2.3 GB. Reads 8192 tokens, so never
+  truncates; only practical with a GPU
+The eval is small and saturated — it separates bad from good, not good from
+better. A larger eval set is the prerequisite for revisiting this choice.
+
+Carried into Phase 4 (API) and Phase 5 (UI), in addition to those below:
+1. Build one HybridRetriever at startup and reuse it. open() loads both models
+   (~7 s cold); search() is then ~1 s. IndexUnavailableError is a deliberate
+   refusal like the others — surface its message, not a 500.
+2. No relevance floor, and reranker scores cannot provide one. The vector index
+   always returns candidates, so nonsense queries still get top_k results. The
+   scores are logits, comparable only within one query: a correct answer can
+   score below a nonsense query's best hit (the right chunk for "who pays for
+   heat and other utilities" scores -9.15; "INV-2024", absent from the corpus,
+   scores -8.12). Any "no good match" signal needs a different approach.
+3. The reranker shares its 512-token window between query and passage. A query
+   over ~29 tokens trims the tail of the largest chunks (measured: the passage is
+   trimmed, the query kept). Rerank score only; documented, not refused.
 
 What Phase 2 delivered:
 - app/indexing/embeddings.py — bge-base-en-v1.5 behind a TextEmbedder Protocol,
@@ -89,7 +143,8 @@ download just to be read.
 Measured on the real corpus: 4 documents, 69 chunks, largest 480 tokens (482
 once the model adds special tokens, against its 512 limit).
 
-Carried into Phase 3:
+Carried into Phase 3 (all three now handled — kept as the reasoning behind
+the tests in tests/test_fusion.py and tests/test_hybrid_retriever.py):
 1. Fuse with RRF on *rank*, not score. Cosine similarity sits in [-1, 1] while
    BM25 is unbounded and corpus-relative; the two are deliberately not
    normalised against each other. app/indexing/hits.py explains this.
@@ -102,7 +157,7 @@ Carried into Phase 3:
    index gets it right. This is the case fusion has to fix, and a good
    regression test for Phase 3.
 
-Carried into Phase 4 (API) and Phase 5 (UI):
+Carried into Phase 4 (API) and Phase 5 (UI) from Phase 2:
 1. Startup refusals must reach the user as messages. PersonalModeUnavailableError,
    ChunkWindowTooLargeError and pydantic's ValidationError are deliberate, and
    each carries text written for a person. scripts/build_index.py main() shows

@@ -40,13 +40,13 @@ def store() -> VectorStore:
 
 class TestReplaceAll:
     def test_stores_every_chunk(self, store: VectorStore) -> None:
-        store.replace_all(CHUNKS, VECTORS)
+        store.replace_all(CHUNKS, VECTORS, model_name="test/model")
 
         assert store.count() == 3
 
     def test_rebuilding_does_not_duplicate(self, store: VectorStore) -> None:
-        store.replace_all(CHUNKS, VECTORS)
-        store.replace_all(CHUNKS, VECTORS)
+        store.replace_all(CHUNKS, VECTORS, model_name="test/model")
+        store.replace_all(CHUNKS, VECTORS, model_name="test/model")
 
         assert store.count() == 3
 
@@ -54,25 +54,25 @@ class TestReplaceAll:
         self, store: VectorStore
     ) -> None:
         # A document deleted from the corpus must not keep matching queries.
-        store.replace_all(CHUNKS, VECTORS)
-        store.replace_all(CHUNKS[:1], VECTORS[:1])
+        store.replace_all(CHUNKS, VECTORS, model_name="test/model")
+        store.replace_all(CHUNKS[:1], VECTORS[:1], model_name="test/model")
 
         assert store.count() == 1
         assert store.query([0.0, 1.0, 0.0])[0].source_id == "warranty.pdf"
 
     def test_mismatched_counts_are_rejected(self, store: VectorStore) -> None:
         with pytest.raises(ValueError, match="every chunk needs exactly one"):
-            store.replace_all(CHUNKS, VECTORS[:2])
+            store.replace_all(CHUNKS, VECTORS[:2], model_name="test/model")
 
     def test_empty_corpus_is_allowed(self, store: VectorStore) -> None:
-        store.replace_all([], [])
+        store.replace_all([], [], model_name="test/model")
 
         assert store.count() == 0
 
 
 class TestQuery:
     def test_finds_the_nearest_vector(self, store: VectorStore) -> None:
-        store.replace_all(CHUNKS, VECTORS)
+        store.replace_all(CHUNKS, VECTORS, model_name="test/model")
 
         hits = store.query([1.0, 0.0, 0.0])
 
@@ -81,34 +81,34 @@ class TestQuery:
     def test_identical_vector_scores_one(self, store: VectorStore) -> None:
         # Chroma reports cosine distance, where 0.0 means identical. The store
         # flips it to a similarity so higher is always better downstream.
-        store.replace_all(CHUNKS, VECTORS)
+        store.replace_all(CHUNKS, VECTORS, model_name="test/model")
 
         assert store.query([1.0, 0.0, 0.0])[0].score == pytest.approx(1.0)
 
     def test_orthogonal_vector_scores_zero(self, store: VectorStore) -> None:
-        store.replace_all(CHUNKS[:1], VECTORS[:1])
+        store.replace_all(CHUNKS[:1], VECTORS[:1], model_name="test/model")
 
         assert store.query([0.0, 1.0, 0.0])[0].score == pytest.approx(0.0)
 
     def test_hits_are_ordered_best_first(self, store: VectorStore) -> None:
-        store.replace_all(CHUNKS, VECTORS)
+        store.replace_all(CHUNKS, VECTORS, model_name="test/model")
 
         scores = [hit.score for hit in store.query([0.9, 0.4, 0.1], k=3)]
 
         assert scores == sorted(scores, reverse=True)
 
     def test_respects_k(self, store: VectorStore) -> None:
-        store.replace_all(CHUNKS, VECTORS)
+        store.replace_all(CHUNKS, VECTORS, model_name="test/model")
 
         assert len(store.query([1.0, 0.0, 0.0], k=2)) == 2
 
     def test_k_larger_than_the_corpus_is_safe(self, store: VectorStore) -> None:
-        store.replace_all(CHUNKS, VECTORS)
+        store.replace_all(CHUNKS, VECTORS, model_name="test/model")
 
         assert len(store.query([1.0, 0.0, 0.0], k=99)) == 3
 
     def test_non_positive_k_returns_nothing(self, store: VectorStore) -> None:
-        store.replace_all(CHUNKS, VECTORS)
+        store.replace_all(CHUNKS, VECTORS, model_name="test/model")
 
         assert store.query([1.0, 0.0, 0.0], k=0) == []
 
@@ -116,7 +116,7 @@ class TestQuery:
         assert store.query([1.0, 0.0, 0.0]) == []
 
     def test_hit_carries_identity_and_text(self, store: VectorStore) -> None:
-        store.replace_all(CHUNKS, VECTORS)
+        store.replace_all(CHUNKS, VECTORS, model_name="test/model")
 
         hit = store.query([1.0, 0.0, 0.0])[0]
 
@@ -128,7 +128,7 @@ class TestQuery:
 
 class TestPersistence:
     def test_survives_reopening(self, tmp_path: Path) -> None:
-        VectorStore.open(tmp_path).replace_all(CHUNKS, VECTORS)
+        VectorStore.open(tmp_path).replace_all(CHUNKS, VECTORS, model_name="test/model")
 
         reopened = VectorStore.open(tmp_path)
 
@@ -160,7 +160,7 @@ class TestRebuildDoesNotLeak:
         store = VectorStore.open(tmp_path)
 
         for _ in range(3):
-            store.replace_all(CHUNKS, VECTORS)
+            store.replace_all(CHUNKS, VECTORS, model_name="test/model")
 
         assert segment_dirs(tmp_path) == 1
         assert store.count() == 3
@@ -171,26 +171,47 @@ class TestRebuildDoesNotLeak:
         # Real rebuilds are separate runs of build_index.py, each opening the
         # store fresh — the case the original leak was measured in.
         for _ in range(3):
-            VectorStore.open(tmp_path).replace_all(CHUNKS, VECTORS)
+            VectorStore.open(tmp_path).replace_all(
+                CHUNKS, VECTORS, model_name="test/model"
+            )
 
         assert segment_dirs(tmp_path) == 1
 
     def test_width_is_recorded(self, store: VectorStore) -> None:
-        store.replace_all(CHUNKS, VECTORS)
+        store.replace_all(CHUNKS, VECTORS, model_name="test/model")
 
         assert store._collection.metadata["embedding_dim"] == 3
 
     def test_new_embedding_width_rebuilds_cleanly(self, store: VectorStore) -> None:
         # Switching model changes the width. Clearing in place would keep the
         # collection locked to the old width and reject every new vector.
-        store.replace_all(CHUNKS, VECTORS)
+        store.replace_all(CHUNKS, VECTORS, model_name="test/model")
         wider = [vector + [0.0] for vector in VECTORS]
 
-        store.replace_all(CHUNKS, wider)
+        store.replace_all(CHUNKS, wider, model_name="test/wider-model")
 
         assert store.count() == 3
         assert store._collection.metadata["embedding_dim"] == 4
         assert store.query([1.0, 0.0, 0.0, 0.0])[0].source_id == "warranty.pdf"
+
+    def test_model_is_recorded(self, store: VectorStore) -> None:
+        store.replace_all(CHUNKS, VECTORS, model_name="test/model")
+
+        assert store.embedding_model == "test/model"
+
+    def test_new_model_of_the_same_width_is_recorded(self, store: VectorStore) -> None:
+        # Two models can share a width and still place text completely
+        # differently. The width check alone would keep the old name, and
+        # search would then trust vectors it cannot compare against.
+        store.replace_all(CHUNKS, VECTORS, model_name="test/model-a")
+
+        store.replace_all(CHUNKS, VECTORS, model_name="test/model-b")
+
+        assert store.embedding_model == "test/model-b"
+        assert store.count() == 3
+
+    def test_empty_store_reports_no_model(self, store: VectorStore) -> None:
+        assert store.embedding_model is None
 
     def test_index_built_before_width_tracking_is_upgraded(
         self, tmp_path: Path
@@ -204,21 +225,24 @@ class TestRebuildDoesNotLeak:
         )
 
         store = VectorStore.open(tmp_path)
-        store.replace_all(CHUNKS, VECTORS)
+        store.replace_all(CHUNKS, VECTORS, model_name="test/model")
 
         assert store._collection.metadata["embedding_dim"] == 3
+        assert store.embedding_model == "test/model"
         assert store.count() == 3
 
     def test_cosine_distance_survives_recreation(self, store: VectorStore) -> None:
-        store.replace_all(CHUNKS, VECTORS)
-        store.replace_all(CHUNKS, [vector + [0.0] for vector in VECTORS])
+        store.replace_all(CHUNKS, VECTORS, model_name="test/model")
+        store.replace_all(
+            CHUNKS, [vector + [0.0] for vector in VECTORS], model_name="test/wider-model"
+        )
 
         assert store._collection.metadata["hnsw:space"] == "cosine"
 
     def test_emptying_a_populated_store(self, store: VectorStore) -> None:
-        store.replace_all(CHUNKS, VECTORS)
+        store.replace_all(CHUNKS, VECTORS, model_name="test/model")
 
-        store.replace_all([], [])
+        store.replace_all([], [], model_name="test/model")
 
         assert store.count() == 0
 
@@ -227,7 +251,7 @@ class TestInMemoryIsolation:
     def test_each_new_store_starts_empty(self, store: VectorStore) -> None:
         # Chroma shares one in-process system, so without the explicit clear in
         # in_memory() this would inherit whatever a previous test left behind.
-        store.replace_all(CHUNKS, VECTORS)
+        store.replace_all(CHUNKS, VECTORS, model_name="test/model")
 
         assert VectorStore.in_memory().count() == 0
 
@@ -239,7 +263,7 @@ class TestInMemoryIsolation:
         # two stores must coexist, as this test does to show the alternative.
         first = VectorStore.open(tmp_path / "one")
         second = VectorStore.open(tmp_path / "two")
-        first.replace_all(CHUNKS, VECTORS)
+        first.replace_all(CHUNKS, VECTORS, model_name="test/model")
 
         assert first.count() == 3
         assert second.count() == 0

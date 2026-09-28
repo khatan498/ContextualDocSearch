@@ -94,6 +94,26 @@ class Settings(BaseSettings):
     chunk_max_tokens: int = Field(default=480, gt=0)
     chunk_overlap_ratio: float = Field(default=0.15, ge=0.0, lt=1.0)
 
+    # --- Retrieval -------------------------------------------------------
+    # The cross-encoder that re-scores the fused shortlist. Like the embedding
+    # model it is downloaded once (~90 MB) and then loaded from the local cache.
+    # Chosen by measurement over BAAI/bge-reranker-base (less accurate here and
+    # ~6x slower) and BAAI/bge-reranker-v2-m3 (as accurate, ~20x slower on CPU).
+    reranker_model_name: str = "cross-encoder/ms-marco-MiniLM-L6-v2"
+
+    # Hits taken from *each* index before fusion. The fused shortlist is their
+    # union — between this and twice this — and every chunk in it is reranked,
+    # so this is the main lever on search latency.
+    retrieval_candidates: int = Field(default=20, gt=0)
+
+    # The k in reciprocal rank fusion's 1 / (k + rank). 60 is the value from
+    # the original RRF paper and the usual default; larger flattens the gap
+    # between neighbouring ranks further.
+    rrf_k: int = Field(default=60, gt=0)
+
+    # Results returned by a search.
+    search_top_k: int = Field(default=5, gt=0)
+
     # A decorator stack: `@field_validator` registers the method with pydantic,
     # and `@classmethod` makes it receive the class rather than an instance,
     # because it runs while the instance is still being built. Decorators apply
@@ -144,6 +164,32 @@ class Settings(BaseSettings):
                 f"chunk_max_tokens ({self.chunk_max_tokens})"
             )
         return self
+
+    @model_validator(mode="after")
+    def _check_result_count(self) -> Self:
+        """Reject asking for more results than retrieval guarantees to find.
+
+        The shortlist holds at least ``retrieval_candidates`` chunks whenever
+        the corpus does, so a larger ``search_top_k`` could silently return
+        fewer results than configured.
+        """
+        if self.search_top_k > self.retrieval_candidates:
+            raise ValueError(
+                f"search_top_k ({self.search_top_k}) must be <= "
+                f"retrieval_candidates ({self.retrieval_candidates})"
+            )
+        return self
+
+    # `@property` turns a method into a read-only attribute, accessed without
+    # parentheses — the equivalent of a C# get-only property.
+    @property
+    def keyword_index_path(self) -> Path:
+        """Where the BM25 index file lives, beside the vector store.
+
+        Derived rather than configurable, so the builder and the retriever can
+        never disagree about the location.
+        """
+        return self.vector_store_path / "bm25_index.json"
 
 
 @lru_cache(maxsize=1)

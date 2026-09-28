@@ -47,15 +47,16 @@ class VectorStore:
             COLLECTION_NAME, metadata={"hnsw:space": "cosine"}
         )
 
-    def _recreate(self, dimensions: int) -> None:
-        """Drop the collection and create it afresh for vectors of this width.
+    def _recreate(self, dimensions: int, model_name: str) -> None:
+        """Drop the collection and create it afresh for a new embedding model.
 
-        Only needed when the width changes — i.e. a different embedding model.
-        Chroma leaves the dropped collection's files on disk (measured: one
-        orphaned directory per drop), so this is kept off the normal path.
+        Only needed when the model changes. Chroma leaves the dropped
+        collection's files on disk (measured: one orphaned directory per drop),
+        so this is kept off the normal rebuild path.
 
         Args:
             dimensions: Length of the vectors the new collection will hold.
+            model_name: The embedding model that produced them.
         """
         # delete_collection raises if it does not exist yet, which is normal on
         # a first run — nothing to clean up in that case.
@@ -66,9 +67,16 @@ class VectorStore:
 
         self._collection = self._client.create_collection(
             COLLECTION_NAME,
-            metadata={"hnsw:space": "cosine", "embedding_dim": dimensions},
+            metadata={
+                "hnsw:space": "cosine",
+                "embedding_dim": dimensions,
+                "embedding_model": model_name,
+            },
         )
-        logger.info("Created collection %s for %d-dim vectors", COLLECTION_NAME, dimensions)
+        logger.info(
+            "Created collection %s for %d-dim vectors from %s",
+            COLLECTION_NAME, dimensions, model_name,
+        )
 
     def _clear(self) -> None:
         """Delete every vector while keeping the collection and its files."""
@@ -119,22 +127,24 @@ class VectorStore:
             logger.debug("No existing in-memory collection to clear")
         return cls(client)
 
-    def replace_all(self, chunks: Sequence[Chunk], vectors: Sequence[Vector]) -> None:
+    def replace_all(
+        self, chunks: Sequence[Chunk], vectors: Sequence[Vector], *, model_name: str
+    ) -> None:
         """Replace the entire collection with these chunks.
 
         Everything is removed first rather than upserted over, so a rebuild
         after documents are removed or re-chunked cannot leave stale vectors
         behind, silently matching text that no longer exists.
 
-        *How* it is removed depends on the vector width, recorded in the
-        collection's metadata as ``embedding_dim``:
+        *How* it is removed depends on the embedding model, recorded in the
+        collection's metadata as ``embedding_model`` and ``embedding_dim``:
 
-        - Same width as last time (the normal rebuild): clear the vectors in
-          place. The collection and its files are reused.
-        - Different width, or none recorded (a new embedding model, or an index
-          built before this was tracked): drop and recreate. A cleared
-          collection stays locked to its old width and would reject the new
-          vectors, so this is the only option then.
+        - Same model and width as last time (the normal rebuild): clear the
+          vectors in place. The collection and its files are reused.
+        - Anything else — a new model, or an index built before the model was
+          recorded: drop and recreate. A cleared collection stays locked to its
+          old width and would reject a different one, and a new model name has
+          to be written into the metadata either way.
 
         The split matters because Chroma does not delete a dropped
         collection's files. Dropping on every rebuild left one orphaned
@@ -144,6 +154,9 @@ class VectorStore:
             chunks: Chunks to store; ``source_id`` should be relative to the
                 corpus root.
             vectors: One vector per chunk, in the same order.
+            model_name: The embedding model that produced ``vectors``. Search
+                refuses to run when the configured model differs, because a
+                query vector from one model is meaningless against another's.
 
         Raises:
             ValueError: If the counts do not match.
@@ -163,11 +176,14 @@ class VectorStore:
         dimensions = len(vectors[0])
         # `metadata or {}`: a collection created without metadata reports None
         # rather than an empty dict, and None has no `.get`.
-        recorded = (self._collection.metadata or {}).get("embedding_dim")
-        if recorded == dimensions:
+        recorded = self._collection.metadata or {}
+        if (
+            recorded.get("embedding_dim") == dimensions
+            and recorded.get("embedding_model") == model_name
+        ):
             self._clear()
         else:
-            self._recreate(dimensions)
+            self._recreate(dimensions, model_name)
 
         self._collection.add(
             ids=[make_chunk_id(c.source_id, c.chunk_index) for c in chunks],
@@ -225,3 +241,13 @@ class VectorStore:
     def count(self) -> int:
         """Number of vectors currently stored."""
         return int(self._collection.count())
+
+    @property
+    def embedding_model(self) -> str | None:
+        """The embedding model the stored vectors came from.
+
+        ``None`` for an empty store, or one built before the model was
+        recorded.
+        """
+        value = (self._collection.metadata or {}).get("embedding_model")
+        return None if value is None else str(value)

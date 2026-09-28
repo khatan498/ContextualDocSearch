@@ -26,6 +26,17 @@ class TestDefaults:
         assert settings.embedding_model_name == "BAAI/bge-base-en-v1.5"
         assert settings.embedding_batch_size == 32
 
+    def test_retrieval_defaults(self) -> None:
+        settings = Settings()
+        assert settings.reranker_model_name == "cross-encoder/ms-marco-MiniLM-L6-v2"
+        assert settings.retrieval_candidates == 20
+        assert settings.rrf_k == 60
+        assert settings.search_top_k == 5
+
+    def test_keyword_index_sits_beside_the_vector_store(self, tmp_path: Path) -> None:
+        settings = Settings(vector_store_path=tmp_path)
+        assert settings.keyword_index_path == tmp_path / "bm25_index.json"
+
     def test_chunk_window_fits_the_default_model(self) -> None:
         # bge-base-en-v1.5 accepts 512 tokens and truncates silently past it.
         # This asserts the shipped defaults are a safe pairing; the same check
@@ -121,6 +132,13 @@ class TestValidation:
     def test_equal_bounds_are_allowed(self) -> None:
         assert Settings(chunk_min_tokens=800, chunk_max_tokens=800)
 
+    def test_more_results_than_candidates_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="search_top_k"):
+            Settings(search_top_k=21, retrieval_candidates=20)
+
+    def test_results_equal_to_candidates_are_allowed(self) -> None:
+        assert Settings(search_top_k=20, retrieval_candidates=20)
+
     @pytest.mark.parametrize(
         ("field_name", "value"),
         [
@@ -129,6 +147,9 @@ class TestValidation:
             ("max_file_size_bytes", 0),
             ("chunk_overlap_ratio", 1.0),
             ("chunk_overlap_ratio", -0.1),
+            ("retrieval_candidates", 0),
+            ("rrf_k", 0),
+            ("search_top_k", 0),
         ],
     )
     def test_out_of_range_values_rejected(self, field_name: str, value: object) -> None:

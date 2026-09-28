@@ -118,7 +118,7 @@ class TestCacheFirstLoading:
         # between "it's downloading" and "it's hung".
         monkeypatch.setattr(fake_st, "cached", False)
 
-        with caplog.at_level("INFO", logger="app.indexing.embeddings"):
+        with caplog.at_level("INFO", logger="app.model_cache"):
             EmbeddingModel("fake/model")
 
         assert "downloading" in caplog.text

@@ -1,7 +1,8 @@
 """Tests for scripts/build_index.py.
 
-The script lives outside the ``app`` package, so it is loaded by path. A fake
-embedder stands in for the real model, keeping these offline and fast.
+The script lives outside the ``app`` package, so it is loaded by path. The
+``fake_embedder`` fixture from conftest.py stands in for the real model, keeping
+these offline and fast.
 """
 
 import importlib.util
@@ -13,6 +14,7 @@ import pytest
 from app.indexing.keyword_index import KeywordIndex
 from app.indexing.vector_store import VectorStore
 from app.ingestion.chunking import Chunk
+from conftest import FakeEmbeddingModel
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -31,32 +33,11 @@ def _load_build_index():
 build_index = _load_build_index()
 
 
-class FakeEmbeddingModel:
-    """Satisfies TextEmbedder without loading anything.
-
-    Vectors are deterministic and derived from the text, so "nearest" is
-    predictable but the values are meaningless.
-    """
-
-    max_seq_length = 512
-    dimensions = 8
-
-    def count_tokens(self, text: str) -> int:
-        return len(text.split())
-
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return [self._vector(text) for text in texts]
-
-    def embed_query(self, text: str) -> list[float]:
-        return self._vector(text)
-
-    @staticmethod
-    def _vector(text: str) -> list[float]:
-        counts = [0.0] * 8
-        for word in text.lower().split():
-            counts[hash(word) % 8] += 1.0
-        norm = sum(value * value for value in counts) ** 0.5 or 1.0
-        return [value / norm for value in counts]
+# main() hides the transformers progress bars, and importing transformers to do
+# so costs over two seconds. The helper itself is tested in test_cli.py.
+@pytest.fixture(autouse=True)
+def no_transformers_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(build_index, "silence_model_loading_bars", lambda: None)
 
 
 def make_chunk(text: str, source_id: str, chunk_index: int = 0) -> Chunk:
@@ -104,7 +85,7 @@ class TestRelativeSourceId:
 
 class TestCollectChunks:
     def test_skips_documents_with_no_extractable_text(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, fake_embedder: FakeEmbeddingModel
     ) -> None:
         # A scanned PDF extracts to "" without raising. Indexing it would add
         # an empty chunk that matches nothing.
@@ -114,32 +95,34 @@ class TestCollectChunks:
         (tmp_path / "real.txt").write_text("Coverage period is 24 months.", encoding="utf-8")
 
         chunks = build_index.collect_chunks(
-            LocalFSConnector(tmp_path), FakeEmbeddingModel()
+            LocalFSConnector(tmp_path), fake_embedder
         )
 
         assert {c.source_id for c in chunks} == {"real.txt"}
 
-    def test_source_ids_are_relative_to_the_corpus(self, tmp_path: Path) -> None:
+    def test_source_ids_are_relative_to_the_corpus(
+        self, tmp_path: Path, fake_embedder: FakeEmbeddingModel
+    ) -> None:
         from app.ingestion.connectors.local_fs import LocalFSConnector
 
         (tmp_path / "warranty.txt").write_text("Coverage period.", encoding="utf-8")
 
         chunks = build_index.collect_chunks(
-            LocalFSConnector(tmp_path), FakeEmbeddingModel()
+            LocalFSConnector(tmp_path), fake_embedder
         )
 
         assert chunks
         assert all(not Path(c.source_id).is_absolute() for c in chunks)
 
     def test_uses_the_models_tokenizer_for_boundaries(
-        self, tmp_path: Path
+        self, tmp_path: Path, fake_embedder: FakeEmbeddingModel
     ) -> None:
         from app.ingestion.connectors.local_fs import LocalFSConnector
 
         (tmp_path / "doc.txt").write_text("one two three four five", encoding="utf-8")
 
         chunks = build_index.collect_chunks(
-            LocalFSConnector(tmp_path), FakeEmbeddingModel()
+            LocalFSConnector(tmp_path), fake_embedder
         )
 
         # FakeEmbeddingModel counts one token per word; estimate_tokens would
@@ -147,9 +130,37 @@ class TestCollectChunks:
         assert chunks[0].token_count == 5
 
 
+class TestBuild:
+    def test_search_accepts_what_the_build_wrote(
+        self,
+        tmp_path: Path,
+        fresh_settings: None,
+        monkeypatch: pytest.MonkeyPatch,
+        fake_embedder: FakeEmbeddingModel,
+    ) -> None:
+        # The round trip: build() must record the model that actually embedded
+        # the chunks, or search would refuse every index it produces — or,
+        # worse, accept one whose vectors came from somewhere else.
+        from app.indexing.built_index import open_built_indexes
+
+        corpus = tmp_path / "docs"
+        corpus.mkdir()
+        (corpus / "warranty.txt").write_text("Coverage period is 24 months.", encoding="utf-8")
+        monkeypatch.setenv("SAMPLE_DOCS_PATH", str(corpus))
+        monkeypatch.setenv("VECTOR_STORE_PATH", str(tmp_path / "index"))
+        monkeypatch.setenv("EMBEDDING_MODEL_NAME", fake_embedder.name)
+        monkeypatch.setattr(build_index, "EmbeddingModel", lambda: fake_embedder)
+
+        assert build_index.build() == 0
+
+        keyword_index, store = open_built_indexes()
+        assert store.embedding_model == "fake/embedder"
+        assert len(keyword_index) == store.count() == 1
+
+
 class TestIndexesAgreeOnChunkIds:
     def test_same_chunk_has_the_same_id_in_both_indexes(
-        self, tmp_path: Path
+        self, tmp_path: Path, fake_embedder: FakeEmbeddingModel
     ) -> None:
         # Phase 3 merges the two result lists by id, so any divergence here
         # would silently prevent fusion from ever pairing a chunk with itself.
@@ -165,11 +176,11 @@ class TestIndexesAgreeOnChunkIds:
             make_chunk("invoice due net 30 terms", "invoice.docx", 0),
             make_chunk("model serial number listed", "manual.pdf", 0),
         ]
-        model = FakeEmbeddingModel()
+        model = fake_embedder
         vectors = model.embed_documents([c.text for c in chunks])
 
         store = VectorStore.open(tmp_path / "vectors")
-        store.replace_all(chunks, vectors)
+        store.replace_all(chunks, vectors, model_name="test/model")
         keyword = KeywordIndex.build(chunks)
 
         vector_ids = {h.chunk_id for h in store.query(model.embed_query("coverage"), k=5)}
@@ -180,18 +191,48 @@ class TestIndexesAgreeOnChunkIds:
 
 
 class TestMain:
-    def test_verify_without_an_index_exits_nonzero(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    def test_verify_without_an_index_exits_1_with_instructions(
+        self,
+        tmp_path: Path,
+        fresh_settings: None,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
     ) -> None:
-        from app.config import Settings, get_settings
-
-        get_settings.cache_clear()
         monkeypatch.setenv("VECTOR_STORE_PATH", str(tmp_path / "absent"))
-        try:
-            assert build_index.main(["--verify", "anything"]) == 1
-            assert "Run without --verify first" in capsys.readouterr().out
-        finally:
-            get_settings.cache_clear()
+
+        assert build_index.main(["--verify", "anything"]) == 1
+        err = capsys.readouterr().err
+        assert "build_index.py" in err
+        assert "Traceback" not in err
+
+    def test_verify_refuses_an_index_from_another_model(
+        self,
+        tmp_path: Path,
+        fresh_settings: None,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+        fake_embedder: FakeEmbeddingModel,
+    ) -> None:
+        # The diagnostic runs the same checks as search, so it cannot query
+        # vectors from one model with a query vector from another.
+        monkeypatch.setenv("VECTOR_STORE_PATH", str(tmp_path))
+        chunks = [make_chunk(f"chunk number {i}", f"doc{i}.pdf") for i in range(4)]
+        VectorStore.open(tmp_path).replace_all(
+            chunks, fake_embedder.embed_documents([c.text for c in chunks]),
+            model_name="some/other-model",
+        )
+        KeywordIndex.build(chunks).save(tmp_path / "bm25_index.json")
+
+        assert build_index.main(["--verify", "anything"]) == 1
+        assert "some/other-model" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("k", ["0", "-1", "three"])
+    def test_k_must_be_a_positive_number(self, k: str) -> None:
+        # argparse reports a bad argument by exiting with code 2.
+        with pytest.raises(SystemExit) as exited:
+            build_index.main(["--verify", "warranty", "-k", k])
+
+        assert exited.value.code == 2
 
     def test_k_reaches_verify(self, monkeypatch: pytest.MonkeyPatch) -> None:
         seen: dict[str, object] = {}
@@ -221,16 +262,6 @@ class TestMain:
         assert build_index.main([]) == 0
         assert called == [True]
 
-
-@pytest.fixture
-def fresh_settings():
-    """Clear the cached Settings before and after, so env changes take effect
-    here and cannot leak into any other test."""
-    from app.config import get_settings
-
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
 
 
 class TestRefusalsAreMessagesNotTracebacks:

@@ -10,13 +10,12 @@ keywords with the question.
 **This is a demo.** It searches the documents in `data/sample_docs/` and nothing
 else. Connecting your own files is a planned future release — see [Modes](#modes).
 
-> ## Work in progress — no search API yet
+> ## Work in progress — search works from the command line only
 >
-> Ingestion and indexing work and are tested. Both indexes build over the sample
-> documents, and `scripts/build_index.py --verify` will query them — but that is a
-> diagnostic that reports each index separately, not search. The layer that merges
-> and reranks them does not exist yet, and there is no API or UI. Several files in
-> the tree are deliberately empty placeholders.
+> Ingestion, indexing and hybrid retrieval work and are tested:
+> `scripts/search.py "your question"` runs the full pipeline over the sample
+> documents. There is no API or UI yet, and several files in the tree are
+> deliberately empty placeholders.
 >
 > This repo is public to track progress in the open, not because it is ready to use.
 > Read [Known issues](#known-issues) before building on it.
@@ -52,13 +51,19 @@ Then build two indexes over those chunks:
 - **Store a BM25 keyword index** as plain JSON — inspectable, and portable across
   library versions in a way a pickle would not be.
 
-202 tests cover this, and the default run is offline in about two seconds.
+And search them:
+
+- **Query both indexes** for a shortlist of candidates each.
+- **Fuse the two lists by rank** with reciprocal rank fusion, so neither index's
+  score scale can drown out the other.
+- **Rerank the shortlist with a cross-encoder** (`ms-marco-MiniLM-L6-v2`, local),
+  which reads the query and each passage together. Vector similarity alone is never
+  the final answer.
+
+313 tests cover this, and the default run is offline in about six seconds.
 
 ## What is planned
 
-- **Hybrid retrieval** — merge keyword and vector results through reciprocal rank
-  fusion, then rerank with a cross-encoder. Vector similarity alone is never the
-  final answer.
 - **A search API and UI** — a FastAPI endpoint and a Streamlit front end.
 
 Out of scope for v1: any chat or LLM answer-synthesis layer. This is search — it
@@ -153,8 +158,61 @@ That output is a compact argument for why this project is hybrid. The vector ind
 gets the warranty document right from a question sharing almost no words with it.
 BM25's top hit is an unrelated clause, dragged there by "how", "long" and "the" —
 but BM25 is the half that will match `INV-2024-88213` exactly, which embeddings blur
-into every other reference number. Phase 3 fuses the two so each covers the other's
+into every other reference number. Search fuses the two so each covers the other's
 blind spot.
+
+## Searching
+
+```bash
+python scripts/search.py "how long is the warranty"
+python scripts/search.py "termination notice period" -k 3
+```
+
+The first search downloads the reranker (~90 MB); after that both models load from
+the local cache with no network traffic at all.
+
+```
+query  : 'how long is the warranty'
+
+   1   -0.680  Warranty Forms.pdf#1               vec  #1  bm25  #7  GUARANTEE/WARRANTY for ______...
+   2   -4.159  individual-svcs-agrmnt.docx#6      vec #11  bm25   -  If University Records are sub...
+   3   -4.513  Sample Contract.docx#3             vec  #5  bm25   -  Contractor will submit invoic...
+```
+
+`score` is the reranker's relevance judgement — higher is better, but the numbers
+only mean something relative to each other within one query. `vec` and `bm25` show
+where each index placed the chunk before fusion (`-` means that index did not find
+it). BM25's #1 from the diagnostic above is gone: vector search did not rate it, so
+fusion ranked it low and the reranker agreed.
+
+A warm search takes about one second on a laptop CPU, almost all of it the
+cross-encoder. `RETRIEVAL_CANDIDATES` (default 20 per index) is the lever: fewer
+candidates, faster reranking, more risk of missing the right chunk.
+
+Search refuses — with a message and exit code 1, before loading either model —
+when the index is missing or unreadable, when it was built with a different
+`EMBEDDING_MODEL_NAME` than the one configured, or when the two indexes disagree
+(an interrupted build). A query vector from one embedding model is meaningless
+against vectors from another, and two models of the same width would otherwise
+return confident nonsense without any error. Rebuilding fixes all of these.
+
+### Why this reranker
+
+Three cross-encoders were measured on 12 queries whose answer chunk can be picked
+out by its text:
+
+| Reranker | Top result holds the answer | Warm search (CPU) | Download |
+|---|---|---|---|
+| `cross-encoder/ms-marco-MiniLM-L6-v2` (default) | 12/12 | 0.65–1.3 s | 90 MB |
+| `BAAI/bge-reranker-base` | 10/12 | 4.6–7.8 s | 1.1 GB |
+| `BAAI/bge-reranker-v2-m3` | 12/12 | 13–29 s | 2.3 GB |
+
+`bge-reranker-base` tokenizes differently and counts the largest chunk as 544
+tokens, past its 512 limit, so the ends of long chunks go unread. `v2-m3` reads up
+to 8192 tokens and never truncates, but is only practical with a GPU. The set is
+small enough that the default and `v2-m3` tie; it separates bad from good, not good
+from better. `RERANKER_MODEL_NAME` switches models without a rebuild — the reranker
+reads chunk text, not stored vectors.
 
 ## Trying the ingestion pipeline directly
 
@@ -184,16 +242,20 @@ for raw_bytes, metadata in connector.iter_documents():
 ## Tests
 
 ```bash
-pytest                    # 202 tests, about 2 seconds, no network required
-pytest -m integration     # 2 more that load the real model
+pytest                    # 313 tests, about 6 seconds, no network required
+pytest -m integration     # 4 more that load the real models and read the built index
 ```
 
 The default run is offline. Chunking tests use a word-based token estimate rather
-than a real tokenizer, and the embedding tests run against a stub injected into
-`sys.modules` — which works because `EmbeddingModel` imports `sentence_transformers`
-inside `__init__` rather than at module scope. Vector-store tests use real Chroma
-through an in-memory client, so distance semantics are genuinely covered rather than
-mocked.
+than a real tokenizer, and the embedding and reranker tests run against stubs injected
+into `sys.modules` — which works because both model classes import
+`sentence_transformers` inside `__init__` rather than at module scope. Vector-store
+and retrieval tests use real Chroma and real BM25, so ranking behaviour is genuinely
+covered rather than mocked; only the two models are faked.
+
+The integration run includes the regression that motivated hybrid search: it asserts
+that BM25 alone gets "how long is the warranty" wrong, and that the full pipeline
+gets it right.
 
 Any change to chunking or retrieval logic needs a corresponding test.
 
@@ -211,26 +273,38 @@ app/
 │   │   └── local_fs.py          working — recursive walk, skip rules
 │   ├── loaders.py               working — PDF/DOCX/TXT to plain text
 │   └── chunking.py              working — overlapping, size-bounded chunks
+├── cli.py                       working — shared command-line helpers
 ├── indexing/
+│   ├── built_index.py           working — opens the built indexes, refuses stale ones
 │   ├── embeddings.py            working — bge-base behind a TextEmbedder Protocol
 │   ├── hits.py                  working — IndexHit, the shape both indexes return
 │   ├── keyword_index.py         working — BM25, persisted as JSON
 │   └── vector_store.py          working — Chroma, cosine, deterministic ids
-├── retrieval/                   planned — rank fusion, reranking
+├── model_cache.py               working — cache-first model loading, no network once cached
+├── retrieval/
+│   ├── fusion.py                working — reciprocal rank fusion
+│   ├── reranker.py              working — cross-encoder behind a Reranker Protocol
+│   ├── results.py               working — SearchResult
+│   └── hybrid_retriever.py      working — both indexes → fusion → reranking
 └── api/main.py                  planned — search endpoint
 ui/streamlit_app.py              planned — search UI
 scripts/build_index.py           working — index builder + --verify diagnostic
+scripts/search.py                working — command-line search
 data/sample_docs/                the demo corpus (4 documents)
 data/index/                      built artifacts (gitignored, rebuildable)
 ```
 
-The working part of the pipeline is a straight line:
+Indexing and search are two straight lines:
 
 ```
 LocalFSConnector → (bytes, DocumentMetadata) → extract_text() → str
     → chunk_text(count_tokens=model.count_tokens) → Chunk
         → embed_documents() → VectorStore
         → KeywordIndex
+
+query ─┬─ embed_query() → VectorStore.query() ─┐
+       └─ KeywordIndex.query() ────────────────┴─ reciprocal_rank_fusion()
+            → Reranker.score() → SearchResult
 ```
 
 ### Design decisions worth knowing
@@ -271,6 +345,18 @@ roughly [-1, 1]; BM25 is unbounded and depends on the corpus. Nothing normalises
 against the other, because reciprocal rank fusion works on each hit's *rank* within
 its own list and never compares the raw numbers.
 
+**Retrieval is two stages with two jobs.** The indexes and fusion are cheap and aim
+for recall: get the right chunk into a shortlist of 20–40. The cross-encoder is
+accurate but runs once per (query, chunk) pair on every search, so it only ever sees
+that shortlist. There is one path through `HybridRetriever.search()` — no branch
+returns unfused or unreranked results.
+
+**The reranker shares its 512-token window between query and passage.** A 480-token
+chunk plus a typical query fits. A query longer than about 29 tokens pushes the end
+of the largest chunks out of view — measured: the tokenizer trims the passage and
+keeps the query. That affects the rerank score only, never the index, so it is
+documented rather than refused.
+
 ---
 
 ## Known issues
@@ -281,7 +367,7 @@ its own list and never compares the raw numbers.
   returns empty text without raising.
 - **Not pip-installable.** There is no `pyproject.toml`, so `import app` only works
   with the repo root as the working directory. Tests pass only because the root
-  `conftest.py` puts it on `sys.path`, and `scripts/build_index.py` adds it itself.
+  `conftest.py` puts it on `sys.path`, and both scripts add it themselves.
   Configured *data* paths are unaffected: `sample_docs_path`, `vector_store_path` and
   `.env` resolve against the repo root, so the script works from any directory.
 - **No upper version bounds** in `requirements.txt`, so a future breaking release of
@@ -299,6 +385,11 @@ its own list and never compares the raw numbers.
   in-memory system, so constructing a second `VectorStore.in_memory()` drops the
   collection the first is holding. Use `VectorStore.open()` with separate directories
   when two must coexist. Documented on the method and pinned by a test.
+- **Every search returns results, even for nonsense.** Vector search always finds
+  *something* nearest, so there is no "no good match" answer yet. The reranker's
+  scores cannot supply one: they only rank results within a single query. The
+  correct chunk for "who pays for heat and other utilities" scores −9.15, *below*
+  the best hit for `INV-2024` (−8.12), which appears nowhere in the corpus.
 - **No CI**, and no `LICENSE` file yet — see below.
 
 ## A note on privacy
