@@ -331,6 +331,13 @@ class TestChunkCount:
     ) -> None:
         assert make_retriever().chunk_count == len(CHUNKS)
 
+    def test_lists_the_documents(
+        self, make_retriever: Callable[..., HybridRetriever]
+    ) -> None:
+        documents = make_retriever().documents()
+
+        assert documents == {source: 1 for source, _ in sorted(TEXTS)}
+
 
 class TestBlankQuery:
     @pytest.mark.parametrize("query", ["", "   ", "\n\t"])

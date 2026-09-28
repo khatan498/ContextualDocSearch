@@ -120,6 +120,10 @@ class Settings(BaseSettings):
     api_host: str = "127.0.0.1"
     api_port: int = Field(default=8000, ge=1, le=65535)
 
+    # --- UI ---------------------------------------------------------------
+    # The Streamlit page, served by scripts/run_local.py on loopback only.
+    ui_port: int = Field(default=8501, ge=1, le=65535)
+
     # A decorator stack: `@field_validator` registers the method with pydantic,
     # and `@classmethod` makes it receive the class rather than an instance,
     # because it runs while the instance is still being built. Decorators apply
@@ -196,6 +200,17 @@ class Settings(BaseSettings):
         never disagree about the location.
         """
         return self.vector_store_path / "bm25_index.json"
+
+    @property
+    def api_base_url(self) -> str:
+        """The URL a client on this machine uses to reach the search API.
+
+        ``0.0.0.0`` and ``::`` mean "listen on every interface" — addresses a
+        server binds, not ones a client can connect to — so they are mapped to
+        the loopback address.
+        """
+        host = "127.0.0.1" if self.api_host in ("0.0.0.0", "::", "") else self.api_host
+        return f"http://{host}:{self.api_port}"
 
 
 @lru_cache(maxsize=1)

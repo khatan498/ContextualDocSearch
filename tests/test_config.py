@@ -39,6 +39,9 @@ class TestDefaults:
         assert settings.api_host == "127.0.0.1"
         assert settings.api_port == 8000
 
+    def test_ui_port_default(self) -> None:
+        assert Settings().ui_port == 8501
+
     def test_keyword_index_sits_beside_the_vector_store(self, tmp_path: Path) -> None:
         settings = Settings(vector_store_path=tmp_path)
         assert settings.keyword_index_path == tmp_path / "bm25_index.json"
@@ -158,6 +161,7 @@ class TestValidation:
             ("search_top_k", 0),
             ("api_port", 0),
             ("api_port", 65536),
+            ("ui_port", 0),
         ],
     )
     def test_out_of_range_values_rejected(self, field_name: str, value: object) -> None:
@@ -176,3 +180,33 @@ class TestGetSettings:
         first = get_settings()
         get_settings.cache_clear()
         assert get_settings() is not first
+
+
+class TestApiBaseUrl:
+    def test_default_is_loopback(self) -> None:
+        assert Settings().api_base_url == "http://127.0.0.1:8000"
+
+    @pytest.mark.parametrize("wildcard", ["0.0.0.0", "::"])
+    def test_listen_everywhere_addresses_map_to_loopback(self, wildcard: str) -> None:
+        # A server binds 0.0.0.0; a client cannot connect to it.
+        settings = Settings(api_host=wildcard, api_port=9000)
+
+        assert settings.api_base_url == "http://127.0.0.1:9000"
+
+    def test_an_explicit_host_is_kept(self) -> None:
+        assert Settings(api_host="192.168.1.20").api_base_url == "http://192.168.1.20:8000"
+
+
+class TestStreamlitConfig:
+    """.streamlit/config.toml is the backstop for a hand-run `streamlit run`."""
+
+    def test_privacy_defaults_are_overridden(self) -> None:
+        import tomllib
+
+        config = tomllib.loads(
+            (PROJECT_ROOT / ".streamlit" / "config.toml").read_text(encoding="utf-8")
+        )
+
+        assert config["browser"]["gatherUsageStats"] is False
+        assert config["server"]["address"] == "127.0.0.1"
+        assert config["server"]["showEmailPrompt"] is False

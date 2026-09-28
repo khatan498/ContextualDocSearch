@@ -10,12 +10,11 @@ keywords with the question.
 **This is a demo.** It searches the documents in `data/sample_docs/` and nothing
 else. Connecting your own files is a planned future release — see [Modes](#modes).
 
-> ## Work in progress — search works from the command line and over HTTP
+> ## Work in progress — runs locally, not packaged for deployment
 >
-> Ingestion, indexing, hybrid retrieval and the search API work and are tested:
-> `scripts/search.py "your question"` runs the full pipeline, and
-> `scripts/serve.py` serves it as a JSON API. There is no UI yet, and
-> `ui/streamlit_app.py` is a deliberately empty placeholder.
+> Ingestion, indexing, hybrid retrieval, the search API and the search page all
+> work and are tested. `python scripts/run_local.py` opens the search page in your
+> browser. It is built to run on your own machine; there is no deployment setup.
 >
 > This repo is public to track progress in the open, not because it is ready to use.
 > Read [Known issues](#known-issues) before building on it.
@@ -67,11 +66,18 @@ And serve it:
 - **Refuse to start rather than start broken** — every configuration or index
   problem is reported as a message before the port is ever bound.
 
-403 tests cover this, and the default run is offline in under ten seconds.
+And put a page in front of it:
+
+- **A Streamlit search page** — examples to click, highlighted matches, and a
+  plain-language line on *why* each passage was found.
+- **One command** — `python scripts/run_local.py` starts the API and the page, and
+  Ctrl+C stops both.
+
+566 tests cover this, and the default run is offline in about twenty seconds.
 
 ## What is planned
 
-- **A search UI** — a Streamlit front end.
+Nothing further is scheduled for v1 — it is feature-complete as a local demo.
 
 Out of scope for v1: any chat or LLM answer-synthesis layer. This is search — it
 returns passages, not generated answers. Personal mode — searching your own files
@@ -168,7 +174,50 @@ but BM25 is the half that will match `INV-2024-88213` exactly, which embeddings 
 into every other reference number. Search fuses the two so each covers the other's
 blind spot.
 
-## Searching
+## Using the search page
+
+```bash
+python scripts/run_local.py
+```
+
+This starts the search API, waits until it has loaded its models (about ten
+seconds), and opens the search page at `http://127.0.0.1:8501`. If an API is
+already running it is reused and left running when you quit. Ctrl+C stops
+everything the command started. If the API cannot start — no index, personal mode,
+invalid settings — you get its message and the page never opens. If port 8000 or
+8501 is already taken by another program, it says so straight away, before any
+model loads; `API_PORT` and `UI_PORT` in `.env` move them.
+
+What is on the page:
+
+- **Search box** with a results selector (3, 5 or 10). Enter or **Search** runs it.
+- **Example buttons** — "How long is the warranty?", "Who pays for utilities?",
+  "FERPA", "GA-48" and more — chosen to show both halves of hybrid search: questions
+  answered by *meaning*, and codes found by *exact term*.
+- **One card per result**: the document, which passage of it ("passage 2 of 3"), the
+  passage itself with your query's words highlighted, and a **Why** line in plain
+  words — "meaning match #1 · keyword match #7" — saying which half of the search
+  found it and where each placed it.
+- **Details** under each card: the raw scores, with a reminder that they only rank
+  results within one search and are not a confidence measure. That is why they are
+  not on the card itself.
+- **Sidebar**: whether the search service is connected, the four documents with
+  their passage counts, a short "How search works", and the models in use.
+- **A plain footer** under the results: these are the closest passages in the demo
+  documents, and the answer may not be among them. Search always returns its best
+  candidates, even for questions the documents cannot answer.
+
+If the search service stops, the page says so and shows the command to start it,
+rather than an error trace.
+
+**Three Streamlit defaults are switched off**, because they break this project's
+promises. Out of the box, Streamlit sends usage statistics to its developers,
+listens on every network interface, and stops its first launch to ask for an email
+address. `run_local.py` overrides all three on the command line, and
+`.streamlit/config.toml` does the same for anyone running
+`streamlit run ui/streamlit_app.py` by hand from the repo root.
+
+## Searching from the command line
 
 ```bash
 python scripts/search.py "how long is the warranty"
@@ -306,8 +355,8 @@ for raw_bytes, metadata in connector.iter_documents():
 ## Tests
 
 ```bash
-pytest                    # 403 tests, under ten seconds, no network required
-pytest -m integration     # 6 more that load the real models and read the built index
+pytest                    # 566 tests, about twenty seconds, no network required
+pytest -m integration     # 7 more that load the real models and read the built index
 ```
 
 The default run is offline. Chunking tests use a word-based token estimate rather
@@ -315,7 +364,11 @@ than a real tokenizer, and the embedding and reranker tests run against stubs in
 into `sys.modules` — which works because both model classes import
 `sentence_transformers` inside `__init__` rather than at module scope. Vector-store
 and retrieval tests use real Chroma and real BM25, so ranking behaviour is genuinely
-covered rather than mocked; only the two models are faked.
+covered rather than mocked; only the two models are faked. The search page is
+tested headlessly with Streamlit's `AppTest`, against a fake API client.
+
+Every source file is also parsed with the Python 3.11 grammar, so syntax newer than
+the supported minimum cannot slip in unnoticed from a 3.14 development machine.
 
 The integration run includes the regression that motivated hybrid search: it asserts
 that BM25 alone gets "how long is the warranty" wrong, and that the full pipeline
@@ -350,14 +403,19 @@ app/
 │   ├── reranker.py              working — cross-encoder behind a Reranker Protocol
 │   ├── results.py               working — SearchResult
 │   └── hybrid_retriever.py      working — both indexes → fusion → reranking
-└── api/
-    ├── schemas.py               working — request/response models (the HTTP contract)
-    ├── body_limit.py            working — refuses request bodies over 16 KiB
-    └── main.py                  working — FastAPI app: /search, /health, /docs
-ui/streamlit_app.py              planned — search UI
+├── api/
+│   ├── schemas.py               working — request/response models (the HTTP contract)
+│   ├── body_limit.py            working — refuses request bodies over 16 KiB
+│   └── main.py                  working — FastAPI app: /search, /health, /documents
+└── ui/
+    ├── client.py                working — typed API client used by the page
+    └── text.py                  working — safe markdown, highlighting, the "why" line
+ui/streamlit_app.py              working — the search page (layout only)
 scripts/build_index.py           working — index builder + --verify diagnostic
 scripts/search.py                working — command-line search
 scripts/serve.py                 working — runs the API
+scripts/run_local.py             working — runs the API and the page together
+.streamlit/config.toml           Streamlit privacy settings for a hand-run page
 data/sample_docs/                the demo corpus (4 documents)
 data/index/                      built artifacts (gitignored, rebuildable)
 ```
@@ -460,6 +518,11 @@ documented rather than refused.
   the best hit for `INV-2024` (−8.12), which appears nowhere in the corpus.
 - **The API must be restarted after an index rebuild.** The keyword index is held in
   memory, so a running server keeps serving the corpus it started with.
+- **A force-killed launcher leaves the app running.** Ctrl+C, or closing the
+  terminal window, stops everything `run_local.py` started — Windows delivers those
+  to every process in the console. Ending the launcher alone from Task Manager skips
+  its clean-up, so the API and page keep running on ports 8000 and 8501; end the
+  `python` processes too. The next `run_local.py` then reports the port as taken.
 - **No CI**, and no `LICENSE` file yet — see below.
 
 ## A note on privacy
@@ -478,7 +541,8 @@ telemetry is switched off explicitly. `.gitignore` covers `.env` and the built i
 
 The search API listens on `127.0.0.1` unless you choose otherwise, and takes queries
 in the request body rather than the URL, so what you search for never reaches the
-server's access log.
+server's access log. The search page also listens only on `127.0.0.1`, with
+Streamlit's usage statistics switched off.
 
 ## License
 

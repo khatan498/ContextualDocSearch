@@ -44,11 +44,13 @@ def serve(host: str | None, port: int | None) -> int:
     bind_host = settings.api_host if host is None else host
     bind_port = settings.api_port if port is None else port
 
-    print("loading models and checking the index...")
+    # flush=True: when run by run_local.py (or with output redirected), Python
+    # buffers stdout and these lines would otherwise show up late.
+    print("loading models and checking the index...", flush=True)
     retriever = HybridRetriever.open()
-    print(f"ready  : {retriever.chunk_count} chunks searchable")
-    print(f"serving: http://{bind_host}:{bind_port}  (interactive docs at /docs)")
-    print()
+    print(f"ready  : {retriever.chunk_count} chunks searchable", flush=True)
+    print(f"serving: http://{bind_host}:{bind_port}  (interactive docs at /docs)", flush=True)
+    print(flush=True)
 
     # Passing the app object rather than an "app.api.main:app" string means the
     # retriever opened above is the one that serves every request.

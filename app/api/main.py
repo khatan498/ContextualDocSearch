@@ -4,9 +4,10 @@
     uvicorn app.api.main:app             # also works, from the repo root
 
 Endpoints:
-    POST /search   run a search (the query travels in the JSON body)
-    GET  /health   what is loaded
-    GET  /docs     interactive documentation, generated from the schemas
+    POST /search     run a search (the query travels in the JSON body)
+    GET  /health     what is loaded
+    GET  /documents  the searchable documents and their passage counts
+    GET  /docs       interactive documentation, generated from the schemas
 
 The server only ever starts with a working retriever. scripts/serve.py opens it
 before binding the port, so every deliberate refusal — personal mode, invalid
@@ -27,7 +28,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from app.api.body_limit import BodySizeLimitMiddleware
-from app.api.schemas import HealthResponse, SearchHit, SearchRequest, SearchResponse
+from app.api.schemas import (
+    DocumentInfo,
+    DocumentsResponse,
+    HealthResponse,
+    SearchHit,
+    SearchRequest,
+    SearchResponse,
+)
 from app.config import get_settings
 from app.retrieval.hybrid_retriever import HybridRetriever
 from app.retrieval.results import SearchResult
@@ -44,6 +52,8 @@ class Searcher(Protocol):
 
     @property
     def chunk_count(self) -> int: ...
+
+    def documents(self) -> dict[str, int]: ...
 
     def search(self, query: str, top_k: int | None = None) -> list[SearchResult]: ...
 
@@ -165,6 +175,16 @@ def create_app(retriever: Searcher | None = None) -> FastAPI:
             chunks=searcher.chunk_count,
             embedding_model=settings.embedding_model_name,
             reranker_model=settings.reranker_model_name,
+        )
+
+    @app.get("/documents", response_model=DocumentsResponse, summary="What can be searched")
+    def documents(searcher: Annotated[Searcher, Depends(get_retriever)]) -> DocumentsResponse:
+        """List the searchable documents and how many passages each has."""
+        return DocumentsResponse(
+            documents=[
+                DocumentInfo(source_id=source_id, chunks=chunks)
+                for source_id, chunks in searcher.documents().items()
+            ]
         )
 
     # `include_in_schema=False` keeps this convenience redirect out of /docs.

@@ -167,3 +167,21 @@ class TestPersistence:
         stored = payload["entries"][0]["tokens"]
 
         assert stored == tokenize(CORPUS[0].text)
+
+
+class TestChunksPerSource:
+    def test_counts_chunks_per_document_sorted_by_name(self) -> None:
+        chunks = [
+            make_chunk("warranty terms", "warranty.pdf", 0),
+            make_chunk("sublease terms", "sublease.pdf", 0),
+            make_chunk("more warranty", "warranty.pdf", 1),
+            make_chunk("even more warranty", "warranty.pdf", 2),
+        ]
+
+        counts = KeywordIndex.build(chunks).chunks_per_source()
+
+        assert counts == {"sublease.pdf": 1, "warranty.pdf": 3}
+        assert list(counts) == ["sublease.pdf", "warranty.pdf"]
+
+    def test_empty_index(self) -> None:
+        assert KeywordIndex.build([]).chunks_per_source() == {}

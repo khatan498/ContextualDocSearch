@@ -118,3 +118,16 @@ class HealthResponse(BaseModel):
     chunks: int = Field(description="Passages available to search.")
     embedding_model: str
     reranker_model: str
+
+
+class DocumentInfo(BaseModel):
+    """One searchable document."""
+
+    source_id: str = Field(description='Document name, e.g. "Warranty Forms.pdf".')
+    chunks: int = Field(description="Passages the document was split into for search.")
+
+
+class DocumentsResponse(BaseModel):
+    """Body returned by ``GET /documents``."""
+
+    documents: list[DocumentInfo] = Field(description="Sorted by document name.")

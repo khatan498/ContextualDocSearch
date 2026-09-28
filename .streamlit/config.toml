@@ -1,0 +1,16 @@
+# Streamlit settings for anyone running `streamlit run ui/streamlit_app.py` by
+# hand from the repo root. scripts/run_local.py passes the same values as
+# command-line flags, which work from any directory.
+#
+# Each one overrides a Streamlit default that would break this project's
+# promise that nothing leaves the machine.
+
+[browser]
+# Default true: sends usage statistics to Streamlit.
+gatherUsageStats = false
+
+[server]
+# Default unset: listens on every network interface, reachable from the LAN.
+address = "127.0.0.1"
+# Default true: the first launch stops to ask for an email address.
+showEmailPrompt = false

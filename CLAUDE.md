@@ -67,7 +67,69 @@ When implementing:
 - Don't add a chat/LLM-answer layer — this is v1, search-only
 
 ## Current Phase
-Phase 4 complete — search is served over HTTP. Next: Phase 5 — the Streamlit UI.
+Phase 5 complete — v1 is feature-complete as a local demo. Run it with
+`python scripts/run_local.py`. It is not packaged for deployment; the user runs it
+locally only.
+
+What Phase 5 delivered:
+- ui/streamlit_app.py — the page, layout only. Calls the API; loads no models.
+  Takes its client from st.session_state["client"], which is how AppTest injects
+  a fake. Search outcomes live in session_state so reruns redisplay, not
+  re-search. Personal mode / invalid settings render as st.error, not a trace
+- app/ui/client.py — SearchClient over httpx; parses responses with the same
+  pydantic models the API uses (app/api/schemas.py), so the two cannot drift.
+  Errors: ApiUnavailableError, SearchRejectedError (422), ApiError
+- app/ui/text.py — escape_markdown (every ASCII punctuation char, which CommonMark
+  allows), normalize_whitespace, highlight (whole words via keyword_index.tokenize,
+  stopwords skipped), explain_match (the "why" line)
+- GET /documents on the API — {source_id: chunks}, from
+  KeywordIndex.chunks_per_source() via HybridRetriever.documents()
+- scripts/run_local.py — reuses a running API or starts serve.py and waits on
+  /health; passes serve.py's exit code through on refusal; starts Streamlit with
+  --server.address 127.0.0.1, --browser.gatherUsageStats false,
+  --server.showEmailPrompt false; on exit stops only what it started
+- run_local.py also checks the page port, and the API port when it is not
+  reusing an API, before starting anything: a clash is reported at once instead
+  of after ~10 s of model loading followed by Streamlit's terse "Port 8501 is not
+  available". Its progress lines use say() = print(flush=True), because
+  redirected stdout is block-buffered (found end to end: the lines appeared only
+  after shutdown). serve.py's prints are flushed for the same reason
+- port_is_free() connects first, then binds. Bind alone is not enough on
+  Windows: a program listening on 0.0.0.0 does not stop 127.0.0.1 being bound on
+  the same port (measured), so a bind-only check said "free" and Streamlit
+  silently shared the port. SO_EXCLUSIVEADDRUSE on the probe does not help (only
+  the holder can set it). A free port costs ~0.5 s to confirm (Windows is slow to
+  refuse local connections), under 1 s of a ~12 s startup
+- .streamlit/config.toml — the same three overrides for a hand-run page
+- tests/test_compatibility.py — parses every source file with the Python 3.11
+  grammar (ast feature_version). Development is on 3.14, where 3.12+ syntax
+  parses fine; Phase 5 briefly introduced a PEP 695 generic, caught in review
+
+Why those Streamlit overrides: its defaults send usage statistics to Streamlit,
+bind every network interface, and block the first launch on an email prompt.
+Each breaks a project promise; each is pinned by a test.
+
+Rendering rule: passage text is always escaped before st.markdown. Streamlit
+markdown treats $ as LaTeX (contracts are full of dollar amounts), and
+*, _, [..](..), :color[..] as formatting. Never pass unsafe_allow_html.
+
+Score is never shown on a result card, only in its Details expander, with a
+note that it is not confidence (Phase 3 carry-forward 2 still holds).
+
+Windows process behaviour, measured end to end (2026-09-27):
+- .venv\Scripts\python.exe is a stub that starts the real interpreter as a child
+  (two PIDs per script). terminate() on the stub also ends that child — verified —
+  so run_local's stop() is sufficient.
+- A real Ctrl+C reaches every process on the console: launcher, API and page all
+  stopped within ~4 s, nothing left behind.
+- A force-killed launcher (Task Manager) skips its finally block, so the API and
+  page keep running. Documented in README Known issues; a Windows job object with
+  KILL_ON_JOB_CLOSE would close the gap if it ever matters.
+- Testing gotcha: processes started from an agent or CI harness can inherit
+  "Ctrl+C disabled" (SetConsoleCtrlHandler(NULL, TRUE) is inherited). A faithful
+  Ctrl+C test must re-enable it in a wrapper inside a new console first.
+
+Phase 4 — search is served over HTTP.
 
 What Phase 4 delivered:
 - app/api/schemas.py — pydantic request/response models, kept apart from the

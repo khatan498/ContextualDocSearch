@@ -46,6 +46,9 @@ class StubRetriever:
     def chunk_count(self) -> int:
         return 69
 
+    def documents(self) -> dict[str, int]:
+        return {"Sample Contract.docx": 24, "Warranty Forms.pdf": 3}
+
     def search(self, query: str, top_k: int | None = None) -> list[SearchResult]:
         self.calls.append((query, top_k))
         return self.results
@@ -292,6 +295,19 @@ class TestHealth:
         }
 
 
+class TestDocuments:
+    def test_lists_documents_with_their_passage_counts(self, client: TestClient) -> None:
+        response = client.get("/documents")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "documents": [
+                {"source_id": "Sample Contract.docx", "chunks": 24},
+                {"source_id": "Warranty Forms.pdf", "chunks": 3},
+            ]
+        }
+
+
 class TestDocumentation:
     def test_root_redirects_to_the_interactive_docs(self, client: TestClient) -> None:
         response = client.get("/", follow_redirects=False)
@@ -304,6 +320,7 @@ class TestDocumentation:
 
         assert "post" in paths["/search"]
         assert "get" in paths["/health"]
+        assert "get" in paths["/documents"]
         assert "/" not in paths
 
     def test_openapi_warns_that_scores_are_per_query(self, client: TestClient) -> None:

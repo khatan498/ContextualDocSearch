@@ -113,6 +113,14 @@ class HybridRetriever:
         """
         return len(self._keyword_index)
 
+    def documents(self) -> dict[str, int]:
+        """The searchable documents and how many chunks each contributed.
+
+        Returns:
+            ``{source_id: chunk_count}``, sorted by document name.
+        """
+        return self._keyword_index.chunks_per_source()
+
     def search(self, query: str, top_k: int | None = None) -> list[SearchResult]:
         """Find the chunks most relevant to a query.
 

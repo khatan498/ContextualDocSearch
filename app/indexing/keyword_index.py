@@ -13,6 +13,7 @@ number; BM25 matches it exactly. Each covers the other's blind spot.
 import json
 import logging
 import re
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -198,6 +199,19 @@ class KeywordIndex:
                 )
             )
         return hits
+
+    def chunks_per_source(self) -> dict[str, int]:
+        """How many chunks each document contributed, sorted by document name.
+
+        Returns:
+            ``{source_id: chunk_count}``. Python dicts keep insertion order
+            (guaranteed since 3.7), so building it from sorted items yields a
+            sorted mapping — unlike C#'s Dictionary, where order is undefined.
+        """
+        # Counter is a dict specialised for tallying: Counter(["a", "b", "a"])
+        # == {"a": 2, "b": 1}. Here it counts entries per document.
+        counts = Counter(entry.source_id for entry in self._entries)
+        return dict(sorted(counts.items()))
 
     def __len__(self) -> int:
         """Number of indexed chunks."""
