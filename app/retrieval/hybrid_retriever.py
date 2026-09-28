@@ -105,6 +105,14 @@ class HybridRetriever:
             top_k=settings.search_top_k,
         )
 
+    @property
+    def chunk_count(self) -> int:
+        """Number of chunks searchable, as held by the keyword index.
+
+        ``open()`` has already confirmed the two indexes agree on this count.
+        """
+        return len(self._keyword_index)
+
     def search(self, query: str, top_k: int | None = None) -> list[SearchResult]:
         """Find the chunks most relevant to a query.
 

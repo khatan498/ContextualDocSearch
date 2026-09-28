@@ -325,6 +325,13 @@ class TestResultCount:
         assert make_retriever().search("termination notice", top_k=0) == []
 
 
+class TestChunkCount:
+    def test_reports_the_indexed_chunks(
+        self, make_retriever: Callable[..., HybridRetriever]
+    ) -> None:
+        assert make_retriever().chunk_count == len(CHUNKS)
+
+
 class TestBlankQuery:
     @pytest.mark.parametrize("query", ["", "   ", "\n\t"])
     def test_returns_nothing_without_consulting_either_model(

@@ -17,12 +17,7 @@ from pathlib import Path
 # run directly from any directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pydantic import ValidationError  # noqa: E402
-
-from app.cli import positive_int, silence_model_loading_bars  # noqa: E402
-from app.indexing.built_index import IndexUnavailableError  # noqa: E402
-from app.indexing.embeddings import ChunkWindowTooLargeError  # noqa: E402
-from app.modes import PersonalModeUnavailableError  # noqa: E402
+from app.cli import positive_int, run_with_refusals, silence_model_loading_bars  # noqa: E402
 from app.retrieval.hybrid_retriever import HybridRetriever  # noqa: E402
 from app.retrieval.results import SearchResult  # noqa: E402
 
@@ -104,22 +99,9 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.WARNING, format="%(message)s", stream=sys.stdout)
     silence_model_loading_bars()
 
-    # The same pattern as build_index.main(): deliberate refusals print their
-    # message; anything unexpected keeps its traceback.
-    try:
-        return search(args.query, args.k)
-    except IndexUnavailableError as exc:
-        # Exit 1, like build_index --verify without an index: a state that
-        # rebuilding fixes, not a configuration the user got wrong.
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    except (PersonalModeUnavailableError, ChunkWindowTooLargeError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    except ValidationError as exc:
-        print(f"error: invalid configuration\n{exc}", file=sys.stderr)
-        return 2
-
+    # Deliberate refusals print their message and exit 1 or 2; anything
+    # unexpected keeps its traceback. See run_with_refusals for the mapping.
+    return run_with_refusals(lambda: search(args.query, args.k))
 
 if __name__ == "__main__":
     raise SystemExit(main())

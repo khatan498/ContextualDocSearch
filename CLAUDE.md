@@ -67,8 +67,55 @@ When implementing:
 - Don't add a chat/LLM-answer layer — this is v1, search-only
 
 ## Current Phase
-Phase 3 complete — search works end to end from the command line. Next: Phase 4
-— the FastAPI search endpoint.
+Phase 4 complete — search is served over HTTP. Next: Phase 5 — the Streamlit UI.
+
+What Phase 4 delivered:
+- app/api/schemas.py — pydantic request/response models, kept apart from the
+  SearchResult dataclass. SearchRequest strips the query, rejects blank or
+  >500-char queries and unknown fields (extra="forbid"); top_k 1-100
+- app/api/main.py — create_app(retriever=None). POST /search, GET /health,
+  GET / -> /docs. Searches run under a threading.Lock (measured: parallel
+  searches gained ~15%, since one search already uses every core). The search
+  endpoint is a plain `def` so FastAPI runs it on a worker thread. With no
+  retriever supplied, the lifespan opens one at startup
+- app/api/body_limit.py — pure-ASGI middleware refusing bodies over 16 KiB
+  with 413, by Content-Length or by counting a chunked body as it arrives.
+  Neither uvicorn nor Starlette caps body size; a 20 MB body was read in full
+- A RequestValidationError handler in main.py drops pydantic's "input" field
+  from 422s: the default echoed the whole rejected value (20 MB in, 20 MB out)
+- scripts/serve.py — opens the retriever *before* uvicorn binds the port, so
+  every refusal is a message and the server never starts half-working
+- app/cli.py — run_with_refusals(), the single refusal-to-exit-code mapping
+  used by all three scripts (index problems 1; configuration refusals 2);
+  port_number for --port
+- Settings: api_host (127.0.0.1 — loopback unless deliberately widened),
+  api_port (8000)
+
+Search is POST with a JSON body, not GET, deliberately: uvicorn's access log
+writes every URL, even for rejected requests (verified — a GET with ?query=
+was logged verbatim). Queries are never logged; test_api_main pins this.
+
+Measured 2026-09-27: startup to first answer ~9.3 s; a warm search over HTTP
+~1.05 s; four simultaneous searches all 200 and correct. HTTP results match
+scripts/search.py exactly.
+
+Carried into Phase 5 (UI):
+1. The UI can call POST /search on a running serve.py, or import
+   HybridRetriever directly. Either way, build one retriever and reuse it —
+   open() takes ~7-9 s. If it calls the API, show 422 details and a clear
+   "API not running" message rather than a stack trace.
+2. The server must be restarted after rebuilding the index (the keyword index
+   is held in memory). A UI that embeds the retriever has the same constraint.
+3. Still no relevance floor (see Phase 3 carry-forward 2): nonsense queries
+   return top_k results, and scores cannot separate them. Don't present score
+   as a confidence.
+4. vector_rank / keyword_rank make "why did this match?" answerable in the UI.
+5. Starlette 1.3 warns that its TestClient's use of httpx is deprecated in
+   favour of `httpx2`. Test-only and harmless today; switch when convenient.
+6. `uvicorn app.api.main:app` works but follows a refusal message with
+   uvicorn's own traceback (exit 3). serve.py is the clean path.
+
+Phase 3 — search works end to end from the command line.
 
 What Phase 3 delivered:
 - app/retrieval/fusion.py — reciprocal_rank_fusion over named IndexHit lists;
@@ -110,7 +157,8 @@ identified by its text (top-1 chunk contains the answer / warm CPU latency):
 The eval is small and saturated — it separates bad from good, not good from
 better. A larger eval set is the prerequisite for revisiting this choice.
 
-Carried into Phase 4 (API) and Phase 5 (UI), in addition to those below:
+Carried into Phase 4 (API) and Phase 5 (UI), in addition to those below
+(1 and the refusal handling are now done in Phase 4):
 1. Build one HybridRetriever at startup and reuse it. open() loads both models
    (~7 s cold); search() is then ~1 s. IndexUnavailableError is a deliberate
    refusal like the others — surface its message, not a 500.

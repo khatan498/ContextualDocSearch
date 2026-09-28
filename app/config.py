@@ -114,6 +114,12 @@ class Settings(BaseSettings):
     # Results returned by a search.
     search_top_k: int = Field(default=5, gt=0)
 
+    # --- API server ------------------------------------------------------
+    # Loopback by default: the demo is reachable only from this machine unless
+    # you deliberately bind a wider address, e.g. API_HOST=0.0.0.0.
+    api_host: str = "127.0.0.1"
+    api_port: int = Field(default=8000, ge=1, le=65535)
+
     # A decorator stack: `@field_validator` registers the method with pydantic,
     # and `@classmethod` makes it receive the class rather than an instance,
     # because it runs while the instance is still being built. Decorators apply

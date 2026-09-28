@@ -10,12 +10,12 @@ keywords with the question.
 **This is a demo.** It searches the documents in `data/sample_docs/` and nothing
 else. Connecting your own files is a planned future release — see [Modes](#modes).
 
-> ## Work in progress — search works from the command line only
+> ## Work in progress — search works from the command line and over HTTP
 >
-> Ingestion, indexing and hybrid retrieval work and are tested:
-> `scripts/search.py "your question"` runs the full pipeline over the sample
-> documents. There is no API or UI yet, and several files in the tree are
-> deliberately empty placeholders.
+> Ingestion, indexing, hybrid retrieval and the search API work and are tested:
+> `scripts/search.py "your question"` runs the full pipeline, and
+> `scripts/serve.py` serves it as a JSON API. There is no UI yet, and
+> `ui/streamlit_app.py` is a deliberately empty placeholder.
 >
 > This repo is public to track progress in the open, not because it is ready to use.
 > Read [Known issues](#known-issues) before building on it.
@@ -60,11 +60,18 @@ And search them:
   which reads the query and each passage together. Vector similarity alone is never
   the final answer.
 
-313 tests cover this, and the default run is offline in about six seconds.
+And serve it:
+
+- **A FastAPI search endpoint** — `POST /search`, `GET /health`, and interactive
+  documentation at `/docs`, generated from the request and response schemas.
+- **Refuse to start rather than start broken** — every configuration or index
+  problem is reported as a message before the port is ever bound.
+
+403 tests cover this, and the default run is offline in under ten seconds.
 
 ## What is planned
 
-- **A search API and UI** — a FastAPI endpoint and a Streamlit front end.
+- **A search UI** — a Streamlit front end.
 
 Out of scope for v1: any chat or LLM answer-synthesis layer. This is search — it
 returns passages, not generated answers. Personal mode — searching your own files
@@ -214,6 +221,63 @@ small enough that the default and `v2-m3` tie; it separates bad from good, not g
 from better. `RERANKER_MODEL_NAME` switches models without a rebuild — the reranker
 reads chunk text, not stored vectors.
 
+## Running the API
+
+```bash
+python scripts/serve.py                 # http://127.0.0.1:8000
+python scripts/serve.py --port 8080
+python scripts/serve.py --host 0.0.0.0  # reachable from other machines — deliberately opt-in
+```
+
+Startup opens the index and loads both models before the port is bound — about ten
+seconds — so a server that is running can always search. Every problem search would
+refuse is reported instead, and the server does not start:
+
+| Problem | Exit code |
+|---|---|
+| Index missing, unreadable, or built with another embedding model | 1 |
+| Personal mode, invalid settings, or a chunk size the model cannot read | 2 |
+
+Open `http://127.0.0.1:8000` in a browser for the interactive documentation, or:
+
+```bash
+curl -X POST http://127.0.0.1:8000/search \
+     -H "Content-Type: application/json" \
+     -d '{"query": "how long is the warranty", "top_k": 3}'
+```
+
+```json
+{
+  "query": "how long is the warranty",
+  "took_ms": 1280,
+  "results": [
+    {"rank": 1, "chunk_id": "Warranty Forms.pdf::1", "source_id": "Warranty Forms.pdf",
+     "chunk_index": 1, "text": "GUARANTEE/WARRANTY for ...", "score": -0.68,
+     "rrf_score": 0.0313, "vector_rank": 1, "keyword_rank": 7}
+  ]
+}
+```
+
+- `query` is required, at most 500 characters, and may not be blank. `top_k` is
+  optional (1–100, default `SEARCH_TOP_K`). Anything else — including a misspelt
+  field — is a `422` naming the problem. The error says where and what, but never
+  echoes the rejected value back.
+- Request bodies over 16 KiB are refused with `413` before they are read. The
+  largest valid request is about 6 KB, and neither uvicorn nor FastAPI limits body
+  size on its own.
+- `GET /health` returns the number of searchable chunks and the models in use.
+- **Search is `POST`, not `GET`, on purpose.** Anything in a URL is written to the
+  server's access log — even a request the server rejects — so a `GET` API would log
+  every query in plain text. Queries travel in the body and are never logged.
+- Searches run one at a time. One search already keeps every CPU core busy;
+  measured, running them in parallel gained only about 15%.
+- **Restart the server after rebuilding the index.** The keyword index is read into
+  memory at startup.
+
+`uvicorn app.api.main:app`, run from the repo root, also works. It prints the same
+refusal messages, but uvicorn follows them with its own traceback; `serve.py` is the
+clean path.
+
 ## Trying the ingestion pipeline directly
 
 Chunking without touching the index. Save this at the **repo root** and run it from
@@ -242,8 +306,8 @@ for raw_bytes, metadata in connector.iter_documents():
 ## Tests
 
 ```bash
-pytest                    # 313 tests, about 6 seconds, no network required
-pytest -m integration     # 4 more that load the real models and read the built index
+pytest                    # 403 tests, under ten seconds, no network required
+pytest -m integration     # 6 more that load the real models and read the built index
 ```
 
 The default run is offline. Chunking tests use a word-based token estimate rather
@@ -267,29 +331,33 @@ Any change to chunking or retrieval logic needs a corresponding test.
 app/
 ├── config.py                    working — typed settings (pydantic-settings, .env)
 ├── modes.py                     working — demo/personal modes, and the message
+├── cli.py                       working — shared command-line helpers
+├── model_cache.py               working — cache-first model loading, no network once cached
 ├── ingestion/
 │   ├── document.py              working — DocumentMetadata
 │   ├── connectors/
 │   │   └── local_fs.py          working — recursive walk, skip rules
 │   ├── loaders.py               working — PDF/DOCX/TXT to plain text
 │   └── chunking.py              working — overlapping, size-bounded chunks
-├── cli.py                       working — shared command-line helpers
 ├── indexing/
 │   ├── built_index.py           working — opens the built indexes, refuses stale ones
 │   ├── embeddings.py            working — bge-base behind a TextEmbedder Protocol
 │   ├── hits.py                  working — IndexHit, the shape both indexes return
 │   ├── keyword_index.py         working — BM25, persisted as JSON
 │   └── vector_store.py          working — Chroma, cosine, deterministic ids
-├── model_cache.py               working — cache-first model loading, no network once cached
 ├── retrieval/
 │   ├── fusion.py                working — reciprocal rank fusion
 │   ├── reranker.py              working — cross-encoder behind a Reranker Protocol
 │   ├── results.py               working — SearchResult
 │   └── hybrid_retriever.py      working — both indexes → fusion → reranking
-└── api/main.py                  planned — search endpoint
+└── api/
+    ├── schemas.py               working — request/response models (the HTTP contract)
+    ├── body_limit.py            working — refuses request bodies over 16 KiB
+    └── main.py                  working — FastAPI app: /search, /health, /docs
 ui/streamlit_app.py              planned — search UI
 scripts/build_index.py           working — index builder + --verify diagnostic
 scripts/search.py                working — command-line search
+scripts/serve.py                 working — runs the API
 data/sample_docs/                the demo corpus (4 documents)
 data/index/                      built artifacts (gitignored, rebuildable)
 ```
@@ -390,6 +458,8 @@ documented rather than refused.
   scores cannot supply one: they only rank results within a single query. The
   correct chunk for "who pays for heat and other utilities" scores −9.15, *below*
   the best hit for `INV-2024` (−8.12), which appears nowhere in the corpus.
+- **The API must be restarted after an index rebuild.** The keyword index is held in
+  memory, so a running server keeps serving the corpus it started with.
 - **No CI**, and no `LICENSE` file yet — see below.
 
 ## A note on privacy
@@ -405,6 +475,10 @@ model is loaded strictly from the local cache (`local_files_only=True`) — left
 defaults, the Hugging Face client would otherwise send dozens of requests to
 huggingface.co on every load to check the cached files are current. Chroma's usage
 telemetry is switched off explicitly. `.gitignore` covers `.env` and the built index.
+
+The search API listens on `127.0.0.1` unless you choose otherwise, and takes queries
+in the request body rather than the URL, so what you search for never reaches the
+server's access log.
 
 ## License
 

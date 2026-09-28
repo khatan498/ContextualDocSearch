@@ -33,6 +33,12 @@ class TestDefaults:
         assert settings.rrf_k == 60
         assert settings.search_top_k == 5
 
+    def test_api_defaults_to_loopback(self) -> None:
+        # Reachable only from this machine unless deliberately widened.
+        settings = Settings()
+        assert settings.api_host == "127.0.0.1"
+        assert settings.api_port == 8000
+
     def test_keyword_index_sits_beside_the_vector_store(self, tmp_path: Path) -> None:
         settings = Settings(vector_store_path=tmp_path)
         assert settings.keyword_index_path == tmp_path / "bm25_index.json"
@@ -150,6 +156,8 @@ class TestValidation:
             ("retrieval_candidates", 0),
             ("rrf_k", 0),
             ("search_top_k", 0),
+            ("api_port", 0),
+            ("api_port", 65536),
         ],
     )
     def test_out_of_range_values_rejected(self, field_name: str, value: object) -> None:
