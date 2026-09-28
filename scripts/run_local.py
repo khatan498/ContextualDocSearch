@@ -117,6 +117,9 @@ def streamlit_command(settings: Settings) -> list[str]:
         "--browser.gatherUsageStats", "false",
         # Default: stop the first launch to ask for an email address.
         "--server.showEmailPrompt", "false",
+        # Default: a "Deploy" button (publish to Streamlit's cloud) and a
+        # developer menu — neither belongs in a local-only app.
+        "--client.toolbarMode", "minimal",
     ]  # fmt: skip
 
 

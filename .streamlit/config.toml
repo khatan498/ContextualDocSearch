@@ -14,3 +14,8 @@ gatherUsageStats = false
 address = "127.0.0.1"
 # Default true: the first launch stops to ask for an email address.
 showEmailPrompt = false
+
+[client]
+# Default "auto": a "Deploy" button (publish to Streamlit's cloud) and a
+# developer menu, neither of which belongs in a local-only app.
+toolbarMode = "minimal"

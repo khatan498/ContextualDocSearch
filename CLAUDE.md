@@ -14,10 +14,12 @@ connector, no credential handling, and reads nothing outside its own corpus.
 
 ## Tech Stack
 - Python 3.11+ (StrEnum, typing.Self, datetime.UTC); developed on 3.14
-- Embeddings: sentence-transformers (local, no external API)
-- Vector store: Chroma (dev), Pinecone/Qdrant (deployed)
+- Embeddings: sentence-transformers, BAAI/bge-base-en-v1.5 (local, no external API)
+- Vector store: Chroma, persistent on local disk (data/index/)
 - Keyword index: rank_bm25
-- Reranking: sentence-transformers cross-encoder
+- Reranking: sentence-transformers cross-encoder, ms-marco-MiniLM-L6-v2
+- API: FastAPI served by uvicorn; UI: Streamlit calling that API
+- Runs locally only; nothing is deployed or hosted
 
 ## Developer Context
 I'm an experienced developer (~7 years, strong in .NET/C# and some Java/Spring
@@ -59,8 +61,12 @@ When implementing:
   estimate_tokens (words x 1.3) is a dev/test default only
 
 ## Testing
-- pytest, one test file per module in app/
+- pytest, one test file per module in app/ (scripts and the page have their own
+  test files too: test_serve.py, test_run_local.py, test_ui_page.py, ...)
 - Any change to chunking or retrieval logic needs a corresponding test
+- The default run is offline and needs no built index; `pytest -m integration`
+  loads the real models and reads the built index
+- The Streamlit page is tested with AppTest, a fake client in session_state
 
 ## Things to Avoid
 - No hardcoded file paths or API keys — use app/config.py and .env
@@ -107,11 +113,21 @@ What Phase 5 delivered:
 
 Why those Streamlit overrides: its defaults send usage statistics to Streamlit,
 bind every network interface, and block the first launch on an email prompt.
-Each breaks a project promise; each is pinned by a test.
+Each breaks a project promise; each is pinned by a test. A fourth,
+client.toolbarMode=minimal, hides the "Deploy" button (publish to Streamlit's
+cloud) and the developer menu, which the first real screenshot showed.
 
 Rendering rule: passage text is always escaped before st.markdown. Streamlit
 markdown treats $ as LaTeX (contracts are full of dollar amounts), and
 *, _, [..](..), :color[..] as formatting. Never pass unsafe_allow_html.
+Verified in a real (headless Edge) browser, 2026-09-28: escaped text renders
+literally — except that Streamlit's frontend still turns a bare URL into a
+clickable link after escaping (a URL in individual-svcs-agrmnt.docx does this).
+Accepted: passages only ever come from the bundled corpus. Markdown-syntax
+links cannot be injected; bare URLs will be linked.
+
+The sidebar and "passage n of N" use KeywordIndex.chunks_per_source(), sorted
+case-insensitively (a plain sort listed "individual-..." after "Warranty ...").
 
 Score is never shown on a result card, only in its Details expander, with a
 note that it is not confidence (Phase 3 carry-forward 2 still holds).
@@ -161,7 +177,7 @@ Measured 2026-09-27: startup to first answer ~9.3 s; a warm search over HTTP
 ~1.05 s; four simultaneous searches all 200 and correct. HTTP results match
 scripts/search.py exactly.
 
-Carried into Phase 5 (UI):
+Carried into Phase 5 (UI) — all handled in Phase 5; kept for the reasoning:
 1. The UI can call POST /search on a running serve.py, or import
    HybridRetriever directly. Either way, build one retriever and reuse it —
    open() takes ~7-9 s. If it calls the API, show 422 details and a clear
@@ -220,7 +236,7 @@ The eval is small and saturated — it separates bad from good, not good from
 better. A larger eval set is the prerequisite for revisiting this choice.
 
 Carried into Phase 4 (API) and Phase 5 (UI), in addition to those below
-(1 and the refusal handling are now done in Phase 4):
+(1 was done in Phase 4; 2 and 3 remain true and are documented in README):
 1. Build one HybridRetriever at startup and reuse it. open() loads both models
    (~7 s cold); search() is then ~1 s. IndexUnavailableError is a deliberate
    refusal like the others — surface its message, not a 500.
@@ -267,7 +283,7 @@ the tests in tests/test_fusion.py and tests/test_hybrid_retriever.py):
    index gets it right. This is the case fusion has to fix, and a good
    regression test for Phase 3.
 
-Carried into Phase 4 (API) and Phase 5 (UI) from Phase 2:
+Carried into Phase 4 (API) and Phase 5 (UI) from Phase 2 (all handled):
 1. Startup refusals must reach the user as messages. PersonalModeUnavailableError,
    ChunkWindowTooLargeError and pydantic's ValidationError are deliberate, and
    each carries text written for a person. scripts/build_index.py main() shows

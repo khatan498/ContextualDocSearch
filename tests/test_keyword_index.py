@@ -183,5 +183,24 @@ class TestChunksPerSource:
         assert counts == {"sublease.pdf": 1, "warranty.pdf": 3}
         assert list(counts) == ["sublease.pdf", "warranty.pdf"]
 
+    def test_order_ignores_case(self) -> None:
+        # Found in the real UI: "individual-svcs-agrmnt.docx" was listed after
+        # "Warranty Forms.pdf" because capitals sort first.
+        chunks = [
+            make_chunk("a", "Warranty Forms.pdf"),
+            make_chunk("b", "individual-svcs-agrmnt.docx"),
+            make_chunk("c", "Sample Contract.docx"),
+            make_chunk("d", "texas.pdf"),
+        ]
+
+        order = list(KeywordIndex.build(chunks).chunks_per_source())
+
+        assert order == [
+            "individual-svcs-agrmnt.docx",
+            "Sample Contract.docx",
+            "texas.pdf",
+            "Warranty Forms.pdf",
+        ]
+
     def test_empty_index(self) -> None:
         assert KeywordIndex.build([]).chunks_per_source() == {}

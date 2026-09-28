@@ -267,6 +267,9 @@ class TestStreamlitCommand:
     def test_email_prompt_is_off(self, command: list[str]) -> None:
         assert self.flag(command, "--server.showEmailPrompt") == "false"
 
+    def test_deploy_button_and_developer_menu_are_hidden(self, command: list[str]) -> None:
+        assert self.flag(command, "--client.toolbarMode") == "minimal"
+
     def test_uses_the_configured_port(
         self, harness: Harness, monkeypatch: pytest.MonkeyPatch
     ) -> None:

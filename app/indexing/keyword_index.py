@@ -201,7 +201,7 @@ class KeywordIndex:
         return hits
 
     def chunks_per_source(self) -> dict[str, int]:
-        """How many chunks each document contributed, sorted by document name.
+        """How many chunks each document contributed, sorted by name, ignoring case.
 
         Returns:
             ``{source_id: chunk_count}``. Python dicts keep insertion order
@@ -211,7 +211,9 @@ class KeywordIndex:
         # Counter is a dict specialised for tallying: Counter(["a", "b", "a"])
         # == {"a": 2, "b": 1}. Here it counts entries per document.
         counts = Counter(entry.source_id for entry in self._entries)
-        return dict(sorted(counts.items()))
+        # Sorted ignoring case, as a person reads a list: a plain sort puts
+        # every capitalised name before "individual-svcs-agrmnt.docx".
+        return dict(sorted(counts.items(), key=lambda item: item[0].casefold()))
 
     def __len__(self) -> int:
         """Number of indexed chunks."""

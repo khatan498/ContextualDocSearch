@@ -210,3 +210,4 @@ class TestStreamlitConfig:
         assert config["browser"]["gatherUsageStats"] is False
         assert config["server"]["address"] == "127.0.0.1"
         assert config["server"]["showEmailPrompt"] is False
+        assert config["client"]["toolbarMode"] == "minimal"
